@@ -9,7 +9,7 @@ import type { Application, ApplicationFormData, Job } from './types'
 import { invokeWebMcpTool, registerWebMcpTools } from './webmcp'
 import { getCurrentUser, loginUser, logoutUser, signupUser } from './auth'
 
-if (typeof document !== 'undefined' && 'modelContext' in document) {
+if (typeof document !== 'undefined') {
   void registerWebMcpTools()
 }
 
