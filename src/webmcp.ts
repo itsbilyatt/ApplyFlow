@@ -64,6 +64,82 @@ export function registerWebMcpTools(): WebMcpRuntime {
 
   const tools: WebMcpTool[] = [
     {
+      name: 'login_user',
+      description: 'Authenticate a user with a registered email and password.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          email: { type: 'string' },
+          password: { type: 'string' },
+        },
+        required: ['email', 'password'],
+      },
+      execute: (input = {}) => {
+        const result = loginUser({
+          email: String(input.email ?? ''),
+          password: String(input.password ?? ''),
+        })
+
+        return {
+          tool: 'login_user',
+          ...result,
+        }
+      },
+    },
+    {
+      name: 'signup_user',
+      description: 'Create a new user account with validated credentials.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          email: { type: 'string' },
+          password: { type: 'string' },
+        },
+        required: ['name', 'email', 'password'],
+      },
+      execute: (input = {}) => {
+        const result = signupUser({
+          name: String(input.name ?? ''),
+          email: String(input.email ?? ''),
+          password: String(input.password ?? ''),
+        })
+
+        return {
+          tool: 'signup_user',
+          ...result,
+        }
+      },
+    },
+    {
+      name: 'get_current_user',
+      description: 'Return the current authenticated user session if one exists.',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
+      execute: () => ({
+        tool: 'get_current_user',
+        user: getCurrentUser(),
+      }),
+    },
+    {
+      name: 'logout_user',
+      description: 'Log the current user out of the app.',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
+      execute: () => {
+        logoutUser()
+        return {
+          tool: 'logout_user',
+          success: true,
+          message: 'User logged out successfully.',
+        }
+      },
+    },
+    {
       name: 'search_jobs',
       description: 'Search and rank jobs for a candidate based on skills, location, and work preferences.',
       inputSchema: {
@@ -166,82 +242,6 @@ export function registerWebMcpTools(): WebMcpRuntime {
           tool: 'submit_application',
           application,
           message: application ? 'Application submitted.' : 'Application not found.',
-        }
-      },
-    },
-    {
-      name: 'login_user',
-      description: 'Authenticate a user with a registered email and password.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          email: { type: 'string' },
-          password: { type: 'string' },
-        },
-        required: ['email', 'password'],
-      },
-      execute: (input = {}) => {
-        const result = loginUser({
-          email: String(input.email ?? ''),
-          password: String(input.password ?? ''),
-        })
-
-        return {
-          tool: 'login_user',
-          ...result,
-        }
-      },
-    },
-    {
-      name: 'signup_user',
-      description: 'Create a new user account with validated credentials.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          name: { type: 'string' },
-          email: { type: 'string' },
-          password: { type: 'string' },
-        },
-        required: ['name', 'email', 'password'],
-      },
-      execute: (input = {}) => {
-        const result = signupUser({
-          name: String(input.name ?? ''),
-          email: String(input.email ?? ''),
-          password: String(input.password ?? ''),
-        })
-
-        return {
-          tool: 'signup_user',
-          ...result,
-        }
-      },
-    },
-    {
-      name: 'get_current_user',
-      description: 'Return the current authenticated user session if one exists.',
-      inputSchema: {
-        type: 'object',
-        properties: {},
-      },
-      execute: () => ({
-        tool: 'get_current_user',
-        user: getCurrentUser(),
-      }),
-    },
-    {
-      name: 'logout_user',
-      description: 'Log the current user out of the app.',
-      inputSchema: {
-        type: 'object',
-        properties: {},
-      },
-      execute: () => {
-        logoutUser()
-        return {
-          tool: 'logout_user',
-          success: true,
-          message: 'User logged out successfully.',
         }
       },
     },
