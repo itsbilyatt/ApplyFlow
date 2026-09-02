@@ -6,12 +6,8 @@ import { getApplications, getApplicationById, createApplication, updateApplicati
 import { getCandidateProfile } from './services/candidateService'
 import { getJobDetails, getRecommendedJobs, searchJobs } from './services/jobService'
 import type { Application, ApplicationFormData, Job } from './types'
-import { invokeWebMcpTool, registerWebMcpTools } from './webmcp'
+import { invokeWebMcpTool } from './webmcp'
 import { getCurrentUser, loginUser, logoutUser, signupUser } from './auth'
-
-if (typeof document !== 'undefined') {
-  void registerWebMcpTools()
-}
 
 function App() {
   const currentUser = getCurrentUser()
