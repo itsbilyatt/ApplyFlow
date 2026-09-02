@@ -37,11 +37,11 @@ function WebMcpDiagnostic() {
     <aside className={`webmcp-diagnostic ${status.error ? 'has-error' : 'is-ready'}`} aria-label="WebMCP diagnostic">
       <div className="webmcp-diagnostic-header">
         <strong>WebMCP diagnostic</strong>
-        <span>{status.found ? 'Native support detected' : 'Native support not detected'}</span>
+        <span>{status.found ? 'Support detected' : 'Support unavailable'}</span>
       </div>
       <div className="webmcp-diagnostic-tools">
         <span>Registry ({status.registered.length})</span>
-        <code>{status.registered.length ? status.registered.join(', ') : 'No tools returned by getTools()'}</code>
+        <code>{status.registered.length ? status.registered.join(', ') : 'No tools registered'}</code>
       </div>
       {status.error && <div className="webmcp-diagnostic-error">{status.error}</div>}
     </aside>

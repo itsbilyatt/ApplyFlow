@@ -1,47 +1,50 @@
-import { createApplication, getApplications, getApplicationById, submitApplication, validateApplication } from './services/applicationService'
+import { getApplications } from './services/applicationService'
+import { getCandidateProfile } from './services/candidateService'
 import { getJobDetails, searchJobs } from './services/jobService'
 
 export type WebMcpStatus = { found: boolean; registered: string[]; error?: string }
-const statusEvent = 'applyflow:webmcp-status'
-let currentStatus: WebMcpStatus = { found: false, registered: [], error: 'Waiting for native WebMCP support.' }
 
-declare global {
-  interface Navigator { modelContext?: ModelContext }
+type JsonSchema = {
+  type: 'object'
+  properties: Record<string, { type: string; description?: string; minimum?: number; maximum?: number }>
+  required?: string[]
+  additionalProperties: false
+}
+
+type WebMcpResult = { content: Array<{ type: 'text'; text: string }> }
+
+export type WebMcpTool = {
+  name: string
+  description: string
+  inputSchema: JsonSchema
+  execute: (input: Record<string, unknown>) => WebMcpResult | Promise<WebMcpResult>
+  annotations?: { readOnlyHint?: boolean }
 }
 
 type ModelContext = {
   registerTool: (tool: WebMcpTool, options?: { signal?: AbortSignal }) => Promise<void>
-  getTools: () => Promise<Array<{ name?: string }>>
 }
-type WebMcpTool = {
-  name: string
-  description: string
-  inputSchema: { type: 'object'; properties: Record<string, { type: string; description: string }>; required?: string[]; additionalProperties?: boolean }
-  execute: (input: Record<string, unknown>) => unknown | Promise<unknown>
-  annotations?: { readOnlyHint?: boolean }
+
+declare global {
+  interface Document { modelContext?: ModelContext }
+  interface Navigator { modelContext?: ModelContext }
 }
+
+const statusEvent = 'applyflow:webmcp-status'
+let currentStatus: WebMcpStatus = { found: false, registered: [] }
+let controller: AbortController | undefined
+let registrationContext: ModelContext | undefined
+let registrationPromise: Promise<void> | undefined
 
 function publishStatus(status: WebMcpStatus) {
   currentStatus = status
   if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(statusEvent, { detail: status }))
 }
 
-const registrationKey = Symbol.for('applyflow.webmcp-registration')
-type RegistrationState = { context: ModelContext; promise: Promise<void> }
-
-function getNativeModelContext(): ModelContext | undefined {
-  const context = typeof navigator !== 'undefined' ? navigator.modelContext : undefined
-  return context && typeof context.registerTool === 'function' && typeof context.getTools === 'function' ? context : undefined
-}
-
-async function waitForNativeModelContext(timeoutMs = 10000): Promise<ModelContext> {
-  const startedAt = Date.now()
-  while (Date.now() - startedAt < timeoutMs) {
-    const context = getNativeModelContext()
-    if (context) return context
-    await new Promise((resolve) => window.setTimeout(resolve, 100))
-  }
-  throw new Error('Native WebMCP/modelContext was not available within 10 seconds.')
+function getModelContext(): ModelContext | undefined {
+  if (typeof document === 'undefined') return undefined
+  const modelContext = document.modelContext ?? navigator.modelContext
+  return modelContext && typeof modelContext.registerTool === 'function' ? modelContext : undefined
 }
 
 export function getWebMcpStatus(): WebMcpStatus { return currentStatus }
@@ -54,82 +57,83 @@ export function subscribeToWebMcpStatus(listener: (status: WebMcpStatus) => void
 
 function requiredString(input: Record<string, unknown>, key: string): string {
   const value = input[key]
-  if (typeof value !== 'string' || !value.trim()) throw new Error(`The ${key} is required. Retry with a non-empty ${key} string.`)
+  if (typeof value !== 'string' || !value.trim()) throw new Error(`The ${key} is required.`)
   return value.trim()
 }
 
-// Add a tool by copying one of the entries below: keep the service call in
-// execute, describe every input, and publish state changes to the UI.
+function result(value: unknown): WebMcpResult {
+  return { content: [{ type: 'text', text: JSON.stringify(value) }] }
+}
+
 function defineTools(): WebMcpTool[] {
   return [
     {
       name: 'search_jobs',
-      description: 'Search and filter available jobs by keyword and optional criteria. Choose this for discovering opportunities; use get_job_details for one known job.',
-      inputSchema: { type: 'object', properties: {
-        query: { type: 'string', description: 'Job title, company, skill, or location keyword.' },
-        location: { type: 'string', description: 'Exact location filter, or All.' },
-        experience: { type: 'string', description: 'Minimum experience filter such as 3+ or Any.' },
-        workMode: { type: 'string', description: 'Work mode filter such as Remote, Hybrid, or All.' },
-        salary: { type: 'string', description: 'Minimum salary filter such as ₹20L+ or Any.' },
-        jobType: { type: 'string', description: 'Job type filter such as Full-time or All.' },
-      }, required: ['query'], additionalProperties: false },
-      execute: async (input) => {
+      description: 'Searches currently available jobs in ApplyFlow.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Words to match against job title, company, skills, or location.' },
+          limit: { type: 'integer', minimum: 1, maximum: 20, description: 'Maximum number of jobs to return.' },
+        },
+        required: ['query'],
+        additionalProperties: false,
+      },
+      async execute(input) {
         const query = requiredString(input, 'query')
-        const jobs = searchJobs({ query, location: typeof input.location === 'string' ? input.location : 'All', experience: typeof input.experience === 'string' ? input.experience : 'Any', workMode: typeof input.workMode === 'string' ? input.workMode : 'All', salary: typeof input.salary === 'string' ? input.salary : 'Any', jobType: typeof input.jobType === 'string' ? input.jobType : 'All' })
-        return { query, count: jobs.length, jobs }
+        const requestedLimit = typeof input.limit === 'number' ? input.limit : 10
+        const limit = Math.min(20, Math.max(1, Math.trunc(requestedLimit)))
+        return result({ query, jobs: searchJobs({ query }).slice(0, limit) })
       },
       annotations: { readOnlyHint: true },
     },
     {
       name: 'get_job_details',
-      description: 'Return full details for one job by ID, including responsibilities and requirements. Choose this after search_jobs identifies a specific opportunity.',
-      inputSchema: { type: 'object', properties: { jobId: { type: 'string', description: 'Unique job ID such as job-1.' } }, required: ['jobId'], additionalProperties: false },
-      execute: async (input) => {
+      description: 'Returns full details for one currently available ApplyFlow job.',
+      inputSchema: {
+        type: 'object',
+        properties: { jobId: { type: 'string', description: 'Unique job ID such as job-1.' } },
+        required: ['jobId'],
+        additionalProperties: false,
+      },
+      async execute(input) {
         const jobId = requiredString(input, 'jobId')
         const job = getJobDetails(jobId)
-        if (!job) throw new Error(`No job was found for ${jobId}. Retry with an ID returned by search_jobs.`)
-        return { jobId, job }
+        if (!job) throw new Error(`No job was found for ${jobId}.`)
+        return result({ jobId, job })
       },
       annotations: { readOnlyHint: true },
     },
     {
-      name: 'draft_application',
-      description: 'Create a saved draft application for a job using the existing flow. Choose this to prepare an application for user review; it does not submit it.',
-      inputSchema: { type: 'object', properties: { jobId: { type: 'string', description: 'Unique job ID to prepare an application for.' } }, required: ['jobId'], additionalProperties: false },
-      execute: async (input) => {
-        const jobId = requiredString(input, 'jobId')
-        if (!getJobDetails(jobId)) throw new Error(`No job was found for ${jobId}. Retry with an ID returned by search_jobs.`)
-        const existing = getApplications().find((application) => application.jobId === jobId && application.draft)
-        const application = existing ?? createApplication(jobId)
-        publishStatus({ ...currentStatus })
-        return { applicationId: application.id, jobId, status: application.status, created: !existing }
-      },
-    },
-    {
-      name: 'submit_application',
-      description: 'Submit one existing application after validation. Choose this only after the user reviewed and approved the draft; this changes application state.',
-      inputSchema: { type: 'object', properties: { applicationId: { type: 'string', description: 'Application ID of the reviewed draft.' } }, required: ['applicationId'], additionalProperties: false },
-      execute: async (input) => {
-        const applicationId = requiredString(input, 'applicationId')
-        if (!getApplicationById(applicationId)) throw new Error(`No application was found for ${applicationId}. Retry with an ID returned by draft_application.`)
-        const validation = validateApplication(applicationId)
-        if (!validation.valid) throw new Error(`Application is not ready. Fix: ${validation.issues.join('; ')}`)
-        const submitted = submitApplication(applicationId)
-        if (!submitted) throw new Error(`Application ${applicationId} could not be submitted. Retry after checking its status.`)
-        publishStatus({ ...currentStatus })
-        return { applicationId: submitted.id, jobId: submitted.jobId, status: submitted.status }
-      },
-    },
-    {
       name: 'get_application_status',
-      description: 'Return application status records by application ID or job ID. Choose this to track progress after drafting or submitting.',
-      inputSchema: { type: 'object', properties: { applicationId: { type: 'string', description: 'Optional application ID to look up.' }, jobId: { type: 'string', description: 'Optional job ID to find applications for.' } }, additionalProperties: false },
-      execute: async (input) => {
+      description: "Lists the current status of the user's ApplyFlow applications.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          applicationId: { type: 'string', description: 'Optional application ID to look up.' },
+          jobId: { type: 'string', description: 'Optional job ID to find applications for.' },
+        },
+        additionalProperties: false,
+      },
+      async execute(input) {
         const applicationId = typeof input.applicationId === 'string' ? input.applicationId.trim() : ''
         const jobId = typeof input.jobId === 'string' ? input.jobId.trim() : ''
-        if (!applicationId && !jobId) throw new Error('Provide applicationId or jobId. Retry with one identifier.')
-        const applications = getApplications().filter((application) => (applicationId && application.id === applicationId) || (jobId && application.jobId === jobId))
-        return { applicationId, jobId, count: applications.length, applications: applications.map((application) => ({ applicationId: application.id, jobId: application.jobId, jobTitle: application.jobTitle, company: application.company, status: application.status, updatedAt: application.updatedAt })) }
+        const applications = getApplications().filter((application) =>
+          (!applicationId && !jobId) ||
+          (applicationId && application.id === applicationId) ||
+          (jobId && application.jobId === jobId),
+        )
+        return result({ applications: applications.map(({ id, jobId: applicationJobId, jobTitle, company, status, updatedAt }) => ({ applicationId: id, jobId: applicationJobId, jobTitle, company, status, updatedAt })) })
+      },
+      annotations: { readOnlyHint: true },
+    },
+    {
+      name: 'get_profile_summary',
+      description: 'Returns a read-only summary of the signed-in ApplyFlow candidate profile.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      async execute() {
+        const profile = getCandidateProfile()
+        return result({ id: profile.id, name: profile.name, location: profile.location, experience: profile.experience, currentRole: profile.currentRole, skills: profile.skills, education: profile.education, workPreference: profile.workPreference, profileCompletion: profile.profileCompletion, summary: profile.summary })
       },
       annotations: { readOnlyHint: true },
     },
@@ -138,40 +142,40 @@ function defineTools(): WebMcpTool[] {
 
 export async function registerWebMcpTools(): Promise<void> {
   if (typeof window === 'undefined') return
-
-  try {
-    const modelContext = await waitForNativeModelContext()
-    const globalState = globalThis as typeof globalThis & { [registrationKey]?: RegistrationState }
-    const existing = globalState[registrationKey]
-    if (existing?.context === modelContext) {
-      await existing.promise
-      const registered = (await modelContext.getTools())
-        .map((tool) => tool.name)
-        .filter((name): name is string => Boolean(name))
-      publishStatus({ found: true, registered })
-      return
-    }
-
-    const promise = (async () => {
-      const controller = new AbortController()
-      for (const tool of defineTools()) {
-        await modelContext.registerTool(tool, { signal: controller.signal })
-      }
-
-      const registered = (await modelContext.getTools())
-        .map((tool) => tool.name)
-        .filter((name): name is string => Boolean(name))
-      publishStatus({ found: true, registered })
-      console.info('[ApplyFlow] WebMCP tools registered:', registered)
-    })()
-
-    globalState[registrationKey] = { context: modelContext, promise }
-    await promise
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    const found = Boolean(getNativeModelContext())
-    publishStatus({ found, registered: [], error: message })
-    console.error('[ApplyFlow] WebMCP initialization failed:', error)
+  const modelContext = getModelContext()
+  if (!modelContext) {
+    publishStatus({ found: false, registered: [], error: 'This browser does not support WebMCP.' })
+    return
   }
+  if (registrationPromise && registrationContext === modelContext) return registrationPromise
+
+  controller?.abort()
+  controller = new AbortController()
+  registrationContext = modelContext
+  const registrationController = controller
+  registrationPromise = (async () => {
+    const registered: string[] = []
+    const errors: string[] = []
+    for (const tool of defineTools()) {
+      try {
+        await modelContext.registerTool(tool, { signal: registrationController.signal })
+        registered.push(tool.name)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        errors.push(`${tool.name}: ${message}`)
+        console.error(`[ApplyFlow] WebMCP registration failed for ${tool.name}:`, error)
+      }
+    }
+    publishStatus({ found: true, registered, ...(errors.length ? { error: errors.join('; ') } : {}) })
+    console.info('[ApplyFlow] WebMCP tools registered:', registered)
+  })()
+  return registrationPromise
 }
 
+export function teardownWebMcpTools() {
+  controller?.abort()
+  controller = undefined
+  registrationContext = undefined
+  registrationPromise = undefined
+  publishStatus({ found: false, registered: [] })
+}

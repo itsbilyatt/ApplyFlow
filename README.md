@@ -28,38 +28,35 @@ This repository is currently a frontend prototype. Jobs, candidate data, and app
 
 ## WebMCP Integration
 
-ApplyFlow uses the browser's native WebMCP/model context interface to expose the application's capabilities as tools. On startup, `src/main.tsx` calls `registerWebMcpTools()`. The integration waits for the host browser to provide `navigator.modelContext`, then registers the tools and reports their status in the WebMCP diagnostic panel. Using the browser-owned navigator registry ensures browser-level WebMCP discovery sees the same tools as the page.
+ApplyFlow uses the browser's native WebMCP/model context interface to expose read-only application data as tools. On startup, `src/main.tsx` calls `registerWebMcpTools()`. The integration feature-detects `document.modelContext` first, with `navigator.modelContext` as a compatibility fallback, then registers tools imperatively with `registerTool()`. Unsupported browsers continue to work normally and show a non-blocking diagnostic.
 
 The available tools are:
 
 | Tool | Purpose | Changes application state? |
 | --- | --- | --- |
-| `search_jobs` | Find jobs using a keyword and optional filters | No |
+| `search_jobs` | Find jobs using a keyword and result limit | No |
 | `get_job_details` | Read the full details for a known job ID | No |
-| `draft_application` | Create or reuse a saved application draft | Yes |
-| `submit_application` | Validate and submit an existing application | Yes |
 | `get_application_status` | Read application status by application ID or job ID | No |
+| `get_profile_summary` | Read the signed-in candidate profile summary | No |
 
-Each tool has a description and an input schema so the agent can select the appropriate action and provide structured arguments. Tool execution calls the same application and job services used by the React UI, so the agent and the user interact with the same application state.
+Each tool has a description and a JSON Schema input contract so the agent can select the appropriate action and provide structured arguments. Tool execution calls the same read-only application, candidate, and job services used by the React UI. Registration uses an `AbortController` retained for the page lifetime and aborted during page teardown. ApplyFlow does not expose application submission, messaging, profile mutation, or other state-changing actions through WebMCP.
 
 ## Using ChatGPT in the App Browser
 
 The intended experience is to open ApplyFlow in a ChatGPT-capable in-app browser or another browser host that supports WebMCP. In that setup, ChatGPT acts as the agent and uses the tools exposed by the page to interact with ApplyFlow:
 
 ```text
-User: Find remote database roles with at least 3 years of experience.
-ChatGPT: Calls search_jobs with the requested filters.
+User: Find database roles.
+ChatGPT: Calls search_jobs with the requested query.
 User: Show me the best match.
 ChatGPT: Calls get_job_details for the selected job.
-User: Prepare an application for it.
-ChatGPT: Calls draft_application and returns the application ID.
-User: Review and approve the application.
-ChatGPT: Calls submit_application only after approval; the app validates it first.
+User: What is my application status?
+ChatGPT: Calls get_application_status.
 ```
 
-The agent does not need to simulate clicks or scrape page content for these operations. It uses the structured WebMCP tools made available by the live page. State-changing actions are intentionally separate from read-only tools; the tool contract instructs the agent to submit only after the user has reviewed and approved the draft, and the application service enforces validation before submission.
+The agent does not need to simulate clicks or scrape page content for these operations. It uses the structured WebMCP tools made available by the live page. State-changing actions are intentionally not exposed until explicit user-confirmation handling is implemented.
 
-If the host does not support WebMCP, ApplyFlow still works as a normal web app. The WebMCP diagnostic panel will show that native support was not detected, and agent tool calls will not be available.
+If the host does not support WebMCP, ApplyFlow still works as a normal web app. The WebMCP diagnostic panel will show `This browser does not support WebMCP.` and agent tool calls will not be available.
 
 ## Development
 
