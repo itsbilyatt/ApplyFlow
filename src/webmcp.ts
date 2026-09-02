@@ -1,5 +1,6 @@
-import { createApplication, submitApplication } from './services/applicationService'
+import { createApplication, getApplications, submitApplication } from './services/applicationService'
 import { getJobDetails, searchJobs } from './services/jobService'
+import { getCandidateProfile } from './services/candidateService'
 import { loginUser, signupUser, getCurrentUser, logoutUser } from './auth'
 import type { Job } from './types'
 
@@ -12,11 +13,23 @@ export type WebMcpToolAnnotations = {
   openWorldHint?: boolean
 }
 
+export type WebMcpToolSchemaProperty = {
+  type: string
+  description?: string
+}
+
+export type WebMcpToolInputSchema = {
+  type: 'object'
+  properties: Record<string, WebMcpToolSchemaProperty>
+  required?: string[]
+  additionalProperties?: boolean
+}
+
 export type WebMcpTool = {
   name: string
   title?: string
   description: string
-  inputSchema: Record<string, unknown>
+  inputSchema: WebMcpToolInputSchema
   annotations?: WebMcpToolAnnotations
   execute: (input: WebMcpToolInput) => Promise<any> | any
 }
@@ -25,7 +38,7 @@ export type WebMcpToolSummary = {
   name: string
   title?: string
   description: string
-  inputSchema: Record<string, unknown>
+  inputSchema: WebMcpToolInputSchema
   annotations?: WebMcpToolAnnotations
 }
 
@@ -45,6 +58,30 @@ declare global {
 }
 
 const fallbackToolMap = new Map<string, WebMcpTool>()
+
+function normalizeString(value: unknown, fallback = ''): string {
+  if (typeof value === 'string') return value.trim()
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  return fallback
+}
+
+function getSavedJobs(): string[] {
+  if (typeof window === 'undefined') return []
+
+  try {
+    const raw = window.localStorage.getItem('applyflow-saved-jobs')
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function setSavedJobs(savedJobs: string[]) {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem('applyflow-saved-jobs', JSON.stringify(savedJobs))
+}
 
 function ensureRuntime(): WebMcpRuntime {
   if (typeof document !== 'undefined' && document.modelContext) {
@@ -144,79 +181,71 @@ export function registerWebMcpTools(): WebMcpRuntime {
     {
       name: 'login_user',
       title: 'Login User',
-      description: 'Authenticate a user with a registered email and password.',
+      description: 'Authenticate an existing ApplyFlow user with their email and password so the browser session can be used normally.',
       inputSchema: {
         type: 'object',
         properties: {
-          email: { type: 'string' },
-          password: { type: 'string' },
+          email: { type: 'string', description: 'Registered email address for the ApplyFlow account.' },
+          password: { type: 'string', description: 'Password for the matching user account.' },
         },
         required: ['email', 'password'],
+        additionalProperties: false,
       },
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: false,
-      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
       execute: (input = {}) => {
         const result = loginUser({
-          email: String(input.email ?? ''),
-          password: String(input.password ?? ''),
+          email: normalizeString(input.email),
+          password: normalizeString(input.password),
         })
 
         return {
           tool: 'login_user',
-          ...result,
+          success: result.success,
+          message: result.message,
+          user: result.user ?? null,
         }
       },
     },
     {
       name: 'signup_user',
       title: 'Sign Up User',
-      description: 'Create a new user account with validated credentials.',
+      description: 'Create a new ApplyFlow account and immediately sign the user in so they can browse jobs and submit applications.',
       inputSchema: {
         type: 'object',
         properties: {
-          name: { type: 'string' },
-          email: { type: 'string' },
-          password: { type: 'string' },
+          name: { type: 'string', description: 'Full name for the new account.' },
+          email: { type: 'string', description: 'Email address that will be used to sign in.' },
+          password: { type: 'string', description: 'Password with at least 6 characters.' },
         },
         required: ['name', 'email', 'password'],
+        additionalProperties: false,
       },
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: false,
-      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
       execute: (input = {}) => {
         const result = signupUser({
-          name: String(input.name ?? ''),
-          email: String(input.email ?? ''),
-          password: String(input.password ?? ''),
+          name: normalizeString(input.name),
+          email: normalizeString(input.email),
+          password: normalizeString(input.password),
         })
 
         return {
           tool: 'signup_user',
-          ...result,
+          success: result.success,
+          message: result.message,
+          user: result.user ?? null,
         }
       },
     },
     {
       name: 'get_current_user',
       title: 'Get Current User',
-      description: 'Return the current authenticated user session if one exists.',
+      description: 'Return the currently logged-in ApplyFlow user from the browser session so the agent can operate with the same authenticated identity.',
       inputSchema: {
         type: 'object',
         properties: {},
+        additionalProperties: false,
       },
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       execute: () => ({
         tool: 'get_current_user',
         user: getCurrentUser(),
@@ -225,17 +254,13 @@ export function registerWebMcpTools(): WebMcpRuntime {
     {
       name: 'logout_user',
       title: 'Log Out User',
-      description: 'Log the current user out of the app.',
+      description: 'Sign the current session out of ApplyFlow and clear the authenticated browser state.',
       inputSchema: {
         type: 'object',
         properties: {},
+        additionalProperties: false,
       },
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: true,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
       execute: () => {
         logoutUser()
         return {
@@ -248,134 +273,258 @@ export function registerWebMcpTools(): WebMcpRuntime {
     {
       name: 'search_jobs',
       title: 'Search Jobs',
-      description: 'Search and rank jobs for a candidate based on skills, location, and work preferences.',
+      description: 'Search available job opportunities by keyword and location. Returns matching jobs with title, company, location, salary, and job ID.',
       inputSchema: {
         type: 'object',
         properties: {
-          query: { type: 'string' },
-          location: { type: 'string' },
-          experience: { type: 'string' },
-          workMode: { type: 'string' },
-          salary: { type: 'string' },
-          jobType: { type: 'string' },
-          limit: { type: 'number' },
+          keyword: { type: 'string', description: 'Job title, company, skill, or keyword to search for.' },
+          location: { type: 'string', description: 'Location to filter by, such as Pune, Hyderabad, or Remote.' },
+          experience: { type: 'string', description: 'Minimum required experience level, such as 3+ years or Any.' },
+          workMode: { type: 'string', description: 'Work mode filter such as Hybrid, Remote, or On-site.' },
+          salary: { type: 'string', description: 'Salary threshold such as ₹20L+ or Any.' },
+          limit: { type: 'number', description: 'Maximum number of results to return.' },
         },
+        required: ['keyword'],
+        additionalProperties: false,
       },
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       execute: (input = {}) => {
+        const keyword = normalizeString(input.keyword ?? input.query, '')
+        const location = normalizeString(input.location, 'All')
         const jobs = searchJobs({
-          query: String(input.query ?? ''),
-          location: String(input.location ?? 'All'),
-          experience: String(input.experience ?? 'Any'),
-          workMode: String(input.workMode ?? 'All'),
-          salary: String(input.salary ?? 'Any'),
-          jobType: String(input.jobType ?? 'All'),
+          query: keyword,
+          location,
+          experience: normalizeString(input.experience, 'Any'),
+          workMode: normalizeString(input.workMode, 'All'),
+          salary: normalizeString(input.salary, 'Any'),
+          jobType: normalizeString(input.jobType, 'All'),
         })
 
         const limit = Number(input.limit ?? jobs.length)
+        const safeLimit = Number.isFinite(limit) ? Math.max(0, Math.min(limit, jobs.length)) : jobs.length
+
         return {
           tool: 'search_jobs',
-          jobs: jobs.slice(0, Number.isFinite(limit) ? Math.max(0, limit) : jobs.length),
+          keyword,
+          location,
           count: jobs.length,
+          results: jobs.slice(0, safeLimit),
+          jobs: jobs.slice(0, safeLimit),
         }
       },
     },
     {
       name: 'get_job_details',
       title: 'Get Job Details',
-      description: 'Fetch a single job posting with responsibilities, requirements, and fit score.',
+      description: 'Fetch one job posting by ID and return its responsibilities, requirements, salary, and matching details for a specific opportunity.',
       inputSchema: {
         type: 'object',
         properties: {
-          jobId: { type: 'string' },
+          jobId: { type: 'string', description: 'Unique ID of the job to retrieve, such as job-1.' },
         },
         required: ['jobId'],
+        additionalProperties: false,
       },
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       execute: (input = {}) => {
-        const jobId = String(input.jobId ?? '')
+        const jobId = normalizeString(input.jobId)
         const job = getJobDetails(jobId)
 
         if (!job) {
           return {
             tool: 'get_job_details',
+            success: false,
             job: null,
+            jobId,
             message: `No job found for ${jobId}`,
           }
         }
 
         return {
           tool: 'get_job_details',
+          success: true,
           job,
+          jobId: job.id,
         }
       },
     },
     {
-      name: 'draft_application',
-      title: 'Draft Application',
-      description: 'Create a draft application tailored to the selected role and profile.',
+      name: 'get_my_profile',
+      title: 'Get My Profile',
+      description: 'Return the current candidate profile, skills, resume information, and contact details used by ApplyFlow to match and apply for jobs.',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      execute: () => ({
+        tool: 'get_my_profile',
+        success: true,
+        profile: getCandidateProfile(),
+      }),
+    },
+    {
+      name: 'get_my_resumes',
+      title: 'Get My Resumes',
+      description: 'List the candidate resumes available in ApplyFlow so an application can be submitted using the correct resume document.',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      execute: () => {
+        const profile = getCandidateProfile()
+        const resumes = [
+          {
+            resumeId: profile.resumeName,
+            name: profile.resumeName,
+            type: 'resume',
+            isDefault: true,
+            updatedAt: new Date().toISOString(),
+          },
+        ]
+
+        return {
+          tool: 'get_my_resumes',
+          success: true,
+          resumes,
+          count: resumes.length,
+        }
+      },
+    },
+    {
+      name: 'save_job',
+      title: 'Save Job',
+      description: 'Save a job to the user’s shortlist for later review. This is a personal bookmark action and does not submit an application.',
       inputSchema: {
         type: 'object',
         properties: {
-          jobId: { type: 'string' },
+          jobId: { type: 'string', description: 'Unique job ID to save for later.' },
         },
         required: ['jobId'],
+        additionalProperties: false,
       },
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: false,
-      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       execute: (input = {}) => {
-        const jobId = String(input.jobId ?? '')
-        const created = createApplication(jobId)
+        const jobId = normalizeString(input.jobId)
+        const job = getJobDetails(jobId)
+
+        if (!job) {
+          return {
+            tool: 'save_job',
+            success: false,
+            jobId,
+            message: `No job found for ${jobId}`,
+          }
+        }
+
+        const savedJobs = getSavedJobs()
+        const nextSavedJobs = savedJobs.includes(jobId) ? savedJobs : [...savedJobs, jobId]
+        setSavedJobs(nextSavedJobs)
 
         return {
-          tool: 'draft_application',
-          applicationId: created.id,
-          jobId: created.jobId,
-          jobTitle: created.jobTitle,
-          status: created.status,
-          message: 'Draft created successfully.',
+          tool: 'save_job',
+          success: true,
+          jobId: job.id,
+          title: job.title,
+          company: job.company,
+          saved: true,
+          message: `Saved ${job.title} at ${job.company} for later.`,
         }
       },
     },
     {
-      name: 'submit_application',
-      title: 'Submit Application',
-      description: 'Submit an application after user approval.',
+      name: 'apply_job',
+      title: 'Apply to Job',
+      description: 'Submit an application for a job using the user’s selected resume and the existing ApplyFlow application flow.',
       inputSchema: {
         type: 'object',
         properties: {
-          applicationId: { type: 'string' },
+          jobId: { type: 'string', description: 'Unique ID of the job to apply for.' },
+          resumeId: { type: 'string', description: 'ID of the resume to use for this application.' },
         },
-        required: ['applicationId'],
+        required: ['jobId', 'resumeId'],
+        additionalProperties: false,
       },
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: false,
-      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
       execute: (input = {}) => {
-        const applicationId = String(input.applicationId ?? '')
-        const application = submitApplication(applicationId)
+        const jobId = normalizeString(input.jobId)
+        const resumeId = normalizeString(input.resumeId, getCandidateProfile().resumeName)
+        const job = getJobDetails(jobId)
+
+        if (!job) {
+          return {
+            tool: 'apply_job',
+            success: false,
+            jobId,
+            resumeId,
+            message: `No job found for ${jobId}`,
+          }
+        }
+
+        const draft = createApplication(jobId)
+        const submitted = submitApplication(draft.id)
+
+        if (!submitted) {
+          return {
+            tool: 'apply_job',
+            success: false,
+            jobId,
+            resumeId,
+            message: `Application could not be submitted for ${job.title}.`,
+          }
+        }
 
         return {
-          tool: 'submit_application',
-          application,
-          message: application ? 'Application submitted.' : 'Application not found.',
+          tool: 'apply_job',
+          success: true,
+          applicationId: submitted.id,
+          jobId: submitted.jobId,
+          resumeId,
+          status: submitted.status,
+          message: `Application submitted successfully for ${submitted.jobTitle}.`,
+        }
+      },
+    },
+    {
+      name: 'get_application_status',
+      title: 'Get Application Status',
+      description: 'Check the status of an application by application ID or by job ID so the agent can confirm whether an application was submitted or is still a draft.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          applicationId: { type: 'string', description: 'Application ID to look up.' },
+          jobId: { type: 'string', description: 'Job ID to find the related application.' },
+        },
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      execute: (input = {}) => {
+        const applicationId = normalizeString(input.applicationId, '')
+        const jobId = normalizeString(input.jobId, '')
+        const applications = getApplications()
+
+        const matches = applications.filter((application) => {
+          if (applicationId && application.id === applicationId) return true
+          if (jobId && application.jobId === jobId) return true
+          return false
+        })
+
+        return {
+          tool: 'get_application_status',
+          success: matches.length > 0,
+          count: matches.length,
+          applications: matches.map((application) => ({
+            applicationId: application.id,
+            jobId: application.jobId,
+            jobTitle: application.jobTitle,
+            company: application.company,
+            status: application.status,
+            updatedAt: application.updatedAt,
+          })),
+          message: matches.length ? 'Application status retrieved successfully.' : 'No matching application found.',
         }
       },
     },
