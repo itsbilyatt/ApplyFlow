@@ -539,6 +539,47 @@ export async function registerWebMcpTools(): Promise<WebMcpRuntime> {
         }
       },
     },
+    {
+      name: 'draft_application',
+      title: 'Draft Application',
+      description: 'Create or update a draft job application pre-filled from the candidate profile so it is ready for the user to review before submission.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          jobId: { type: 'string', description: 'Unique ID of the job to draft an application for.' },
+        },
+        required: ['jobId'],
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      execute: (input = {}) => {
+        const jobId = normalizeString(input.jobId)
+        const job = getJobDetails(jobId)
+
+        if (!job) {
+          return {
+            tool: 'draft_application',
+            success: false,
+            jobId,
+            message: `No job found for ${jobId}`,
+          }
+        }
+
+        const existing = getApplications().find((application) => application.jobId === jobId && application.draft)
+        const draft = existing ?? createApplication(jobId)
+
+        return {
+          tool: 'draft_application',
+          success: true,
+          applicationId: draft.id,
+          jobId: draft.jobId,
+          jobTitle: draft.jobTitle,
+          company: draft.company,
+          status: draft.status,
+          message: `Prepared a draft application for ${draft.jobTitle} at ${draft.company}.`,
+        }
+      },
+    },
   ]
 
   for (const tool of tools) {
