@@ -7,25 +7,22 @@ import { getCandidateProfile } from './services/candidateService'
 import { getJobDetails, getRecommendedJobs, searchJobs } from './services/jobService'
 import type { Application, ApplicationFormData, Job } from './types'
 import { getWebMcpStatus, subscribeToWebMcpStatus } from './webmcp'
-import { getCurrentUser, loginUser, logoutUser, signupUser } from './auth'
+import { getCurrentUser, logoutUser } from './auth'
 
 function App() {
-  const currentUser = getCurrentUser()
-
   return (
     <BrowserRouter>
       <WebMcpDiagnostic />
       <Routes>
-        <Route path="/auth" element={<AuthPage />} />
-        <Route path="/" element={currentUser ? <DashboardPage /> : <AuthPage />} />
-        <Route path="/jobs" element={currentUser ? <JobsPage /> : <AuthPage />} />
-        <Route path="/jobs/:jobId" element={currentUser ? <JobDetailsPage /> : <AuthPage />} />
-        <Route path="/applications" element={currentUser ? <ApplicationsPage /> : <AuthPage />} />
-        <Route path="/profile" element={currentUser ? <ProfilePage /> : <AuthPage />} />
-        <Route path="/settings" element={currentUser ? <SettingsPage /> : <AuthPage />} />
-        <Route path="/apply/:jobId" element={currentUser ? <ApplicationPage /> : <AuthPage />} />
-        <Route path="/apply/:jobId/review" element={currentUser ? <ReviewPage /> : <AuthPage />} />
-        <Route path="/apply/:jobId/submitted" element={currentUser ? <SubmittedPage /> : <AuthPage />} />
+        <Route path="/" element={<DashboardPage />} />
+        <Route path="/jobs" element={<JobsPage />} />
+        <Route path="/jobs/:jobId" element={<JobDetailsPage />} />
+        <Route path="/applications" element={<ApplicationsPage />} />
+        <Route path="/profile" element={<ProfilePage />} />
+        <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/apply/:jobId" element={<ApplicationPage />} />
+        <Route path="/apply/:jobId/review" element={<ReviewPage />} />
+        <Route path="/apply/:jobId/submitted" element={<SubmittedPage />} />
       </Routes>
     </BrowserRouter>
   )
@@ -48,88 +45,6 @@ function WebMcpDiagnostic() {
       </div>
       {status.error && <div className="webmcp-diagnostic-error">{status.error}</div>}
     </aside>
-  )
-}
-
-function AuthPage() {
-  const navigate = useNavigate()
-  const [mode, setMode] = useState<'login' | 'signup'>('login')
-  const [name, setName] = useState('')
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [error, setError] = useState('')
-  const [success, setSuccess] = useState('')
-
-  const handleSubmit = () => {
-    if (mode === 'login') {
-      const result = loginUser({ email, password })
-      if (!result.success) {
-        setError(result.message)
-        setSuccess('')
-        return
-      }
-
-      setError('')
-      setSuccess(result.message)
-      window.location.assign('/jobs')
-      return
-    }
-
-    const result = signupUser({ name, email, password })
-    if (!result.success) {
-      setError(result.message)
-      setSuccess('')
-      return
-    }
-
-    setError('')
-    setSuccess(result.message)
-    window.location.assign('/jobs')
-  }
-
-  return (
-    <div className="auth-shell">
-      <div className="auth-card panel">
-        <div className="auth-header">
-          <div className="brand">ApplyFlow</div>
-          <h1>{mode === 'login' ? 'Welcome back' : 'Create account'}</h1>
-        </div>
-
-        <div className="auth-toggle">
-          <button className={mode === 'login' ? 'tab active' : 'tab'} onClick={() => setMode('login')}>Login</button>
-          <button className={mode === 'signup' ? 'tab active' : 'tab'} onClick={() => setMode('signup')}>Sign up</button>
-        </div>
-
-        {mode === 'signup' && (
-          <label>
-            Full name
-            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Jane Doe" />
-          </label>
-        )}
-
-        <label>
-          Email
-          <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" />
-        </label>
-
-        <label>
-          Password
-          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="********" />
-        </label>
-
-        {error && <div className="auth-message error">{error}</div>}
-        {success && <div className="auth-message success">{success}</div>}
-
-        <button className="primary-button full-width" onClick={handleSubmit}>
-          {mode === 'login' ? 'Login' : 'Sign up'}
-        </button>
-
-        <div className="auth-demo">
-          <strong>Demo account:</strong>
-          <div>demo@applyflow.com / demo123</div>
-        </div>
-      </div>
-    </div>
   )
 }
 
@@ -860,7 +775,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
               className="secondary-button"
               onClick={() => {
                 logoutUser()
-                window.location.assign('/auth')
               }}
             >
               Logout

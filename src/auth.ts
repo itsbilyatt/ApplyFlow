@@ -59,7 +59,15 @@ export function getUsers(): AuthUser[] {
 
 export function getCurrentUser(): AuthSession | null {
   const session = readStorage<AuthSession | null>(SESSION_KEY, null)
-  return session
+  if (session) return session
+
+  setCurrentUser(defaultUser)
+  return {
+    id: defaultUser.id,
+    name: defaultUser.name,
+    email: defaultUser.email,
+    loggedInAt: new Date().toISOString(),
+  }
 }
 
 export function setCurrentUser(user: AuthUser) {
@@ -72,9 +80,7 @@ export function setCurrentUser(user: AuthUser) {
 }
 
 export function logoutUser() {
-  if (typeof window !== 'undefined') {
-    window.localStorage.removeItem(SESSION_KEY)
-  }
+  setCurrentUser(defaultUser)
 }
 
 export function signupUser(input: { name: string; email: string; password: string }): { success: boolean; message: string; user?: AuthUser } {
