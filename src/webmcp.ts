@@ -12,11 +12,19 @@ export type WebMcpTool = {
   execute: (input: WebMcpToolInput) => Promise<any> | any
 }
 
+export type WebMcpToolSummary = {
+  name: string
+  description: string
+  inputSchema: Record<string, unknown>
+}
+
 export type WebMcpRuntime = {
   registerTool: (tool: WebMcpTool) => void
-  listTools: () => Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>
+  getTools: () => WebMcpToolSummary[]
+  listTools: () => WebMcpToolSummary[]
   getTool: (name: string) => WebMcpTool | undefined
   callTool: (name: string, input?: WebMcpToolInput) => Promise<any> | any
+  invokeTool: (name: string, input?: WebMcpToolInput) => Promise<any> | any
 }
 
 declare global {
@@ -29,13 +37,51 @@ const fallbackToolMap = new Map<string, WebMcpTool>()
 
 function ensureRuntime(): WebMcpRuntime {
   if (typeof document !== 'undefined' && document.modelContext) {
-    return document.modelContext
+    const runtime = document.modelContext
+
+    if (typeof runtime.getTools !== 'function') {
+      runtime.getTools = () => Array.from(fallbackToolMap.values()).map(({ name, description, inputSchema }) => ({
+        name,
+        description,
+        inputSchema,
+      }))
+    }
+
+    if (typeof runtime.listTools !== 'function') {
+      runtime.listTools = () => runtime.getTools()
+    }
+
+    if (typeof runtime.getTool !== 'function') {
+      runtime.getTool = (name) => fallbackToolMap.get(name)
+    }
+
+    if (typeof runtime.callTool !== 'function') {
+      runtime.callTool = async (name, input = {}) => {
+        const tool = runtime.getTool(name)
+        if (!tool) {
+          throw new Error(`Tool "${name}" is not registered.`)
+        }
+
+        return tool.execute(input)
+      }
+    }
+
+    if (typeof runtime.invokeTool !== 'function') {
+      runtime.invokeTool = runtime.callTool.bind(runtime)
+    }
+
+    return runtime
   }
 
   const runtime: WebMcpRuntime = {
     registerTool: (tool) => {
       fallbackToolMap.set(tool.name, tool)
     },
+    getTools: () => Array.from(fallbackToolMap.values()).map(({ name, description, inputSchema }) => ({
+      name,
+      description,
+      inputSchema,
+    })),
     listTools: () => Array.from(fallbackToolMap.values()).map(({ name, description, inputSchema }) => ({
       name,
       description,
@@ -43,6 +89,14 @@ function ensureRuntime(): WebMcpRuntime {
     })),
     getTool: (name) => fallbackToolMap.get(name),
     callTool: async (name, input = {}) => {
+      const tool = fallbackToolMap.get(name)
+      if (!tool) {
+        throw new Error(`Tool "${name}" is not registered.`)
+      }
+
+      return tool.execute(input)
+    },
+    invokeTool: async (name, input = {}) => {
       const tool = fallbackToolMap.get(name)
       if (!tool) {
         throw new Error(`Tool "${name}" is not registered.`)
@@ -62,6 +116,7 @@ function ensureRuntime(): WebMcpRuntime {
 export function registerWebMcpTools(): WebMcpRuntime {
   const runtime = ensureRuntime()
 
+  const existingNames = new Set(runtime.getTools().map((tool) => tool.name))
   const tools: WebMcpTool[] = [
     {
       name: 'login_user',
@@ -248,7 +303,10 @@ export function registerWebMcpTools(): WebMcpRuntime {
   ]
 
   for (const tool of tools) {
-    runtime.registerTool(tool)
+    if (!existingNames.has(tool.name)) {
+      runtime.registerTool(tool)
+      existingNames.add(tool.name)
+    }
   }
 
   return runtime
@@ -259,12 +317,13 @@ export async function invokeWebMcpTool(name: string, input: WebMcpToolInput = {}
   const tool = runtime.getTool(name)
 
   if (!tool) {
-    throw new Error(`Tool "${name}" is not available.`)
+    const method = typeof runtime.invokeTool === 'function' ? runtime.invokeTool : runtime.callTool
+    return method.call(runtime, name, input)
   }
 
   return tool.execute(input)
 }
 
-export function getRegisteredWebMcpTools(): Array<{ name: string; description: string; inputSchema: Record<string, unknown> }> {
-  return ensureRuntime().listTools()
+export function getRegisteredWebMcpTools(): WebMcpToolSummary[] {
+  return ensureRuntime().getTools()
 }
