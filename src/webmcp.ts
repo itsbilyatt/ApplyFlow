@@ -5,17 +5,28 @@ import type { Job } from './types'
 
 export type WebMcpToolInput = Record<string, any>
 
+export type WebMcpToolAnnotations = {
+  readOnlyHint?: boolean
+  destructiveHint?: boolean
+  idempotentHint?: boolean
+  openWorldHint?: boolean
+}
+
 export type WebMcpTool = {
   name: string
+  title?: string
   description: string
   inputSchema: Record<string, unknown>
+  annotations?: WebMcpToolAnnotations
   execute: (input: WebMcpToolInput) => Promise<any> | any
 }
 
 export type WebMcpToolSummary = {
   name: string
+  title?: string
   description: string
   inputSchema: Record<string, unknown>
+  annotations?: WebMcpToolAnnotations
 }
 
 export type WebMcpRuntime = {
@@ -40,10 +51,12 @@ function ensureRuntime(): WebMcpRuntime {
     const runtime = document.modelContext
 
     if (typeof runtime.getTools !== 'function') {
-      runtime.getTools = () => Array.from(fallbackToolMap.values()).map(({ name, description, inputSchema }) => ({
+      runtime.getTools = () => Array.from(fallbackToolMap.values()).map(({ name, title, description, inputSchema, annotations }) => ({
         name,
+        title,
         description,
         inputSchema,
+        annotations,
       }))
     }
 
@@ -70,6 +83,12 @@ function ensureRuntime(): WebMcpRuntime {
       runtime.invokeTool = runtime.callTool.bind(runtime)
     }
 
+    if (typeof runtime.registerTool !== 'function') {
+      runtime.registerTool = (tool) => {
+        fallbackToolMap.set(tool.name, tool)
+      }
+    }
+
     return runtime
   }
 
@@ -77,15 +96,19 @@ function ensureRuntime(): WebMcpRuntime {
     registerTool: (tool) => {
       fallbackToolMap.set(tool.name, tool)
     },
-    getTools: () => Array.from(fallbackToolMap.values()).map(({ name, description, inputSchema }) => ({
+    getTools: () => Array.from(fallbackToolMap.values()).map(({ name, title, description, inputSchema, annotations }) => ({
       name,
+      title,
       description,
       inputSchema,
+      annotations,
     })),
-    listTools: () => Array.from(fallbackToolMap.values()).map(({ name, description, inputSchema }) => ({
+    listTools: () => Array.from(fallbackToolMap.values()).map(({ name, title, description, inputSchema, annotations }) => ({
       name,
+      title,
       description,
       inputSchema,
+      annotations,
     })),
     getTool: (name) => fallbackToolMap.get(name),
     callTool: async (name, input = {}) => {
@@ -120,6 +143,7 @@ export function registerWebMcpTools(): WebMcpRuntime {
   const tools: WebMcpTool[] = [
     {
       name: 'login_user',
+      title: 'Login User',
       description: 'Authenticate a user with a registered email and password.',
       inputSchema: {
         type: 'object',
@@ -128,6 +152,12 @@ export function registerWebMcpTools(): WebMcpRuntime {
           password: { type: 'string' },
         },
         required: ['email', 'password'],
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
       },
       execute: (input = {}) => {
         const result = loginUser({
@@ -143,6 +173,7 @@ export function registerWebMcpTools(): WebMcpRuntime {
     },
     {
       name: 'signup_user',
+      title: 'Sign Up User',
       description: 'Create a new user account with validated credentials.',
       inputSchema: {
         type: 'object',
@@ -152,6 +183,12 @@ export function registerWebMcpTools(): WebMcpRuntime {
           password: { type: 'string' },
         },
         required: ['name', 'email', 'password'],
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
       },
       execute: (input = {}) => {
         const result = signupUser({
@@ -168,10 +205,17 @@ export function registerWebMcpTools(): WebMcpRuntime {
     },
     {
       name: 'get_current_user',
+      title: 'Get Current User',
       description: 'Return the current authenticated user session if one exists.',
       inputSchema: {
         type: 'object',
         properties: {},
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
       },
       execute: () => ({
         tool: 'get_current_user',
@@ -180,10 +224,17 @@ export function registerWebMcpTools(): WebMcpRuntime {
     },
     {
       name: 'logout_user',
+      title: 'Log Out User',
       description: 'Log the current user out of the app.',
       inputSchema: {
         type: 'object',
         properties: {},
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
       },
       execute: () => {
         logoutUser()
@@ -196,6 +247,7 @@ export function registerWebMcpTools(): WebMcpRuntime {
     },
     {
       name: 'search_jobs',
+      title: 'Search Jobs',
       description: 'Search and rank jobs for a candidate based on skills, location, and work preferences.',
       inputSchema: {
         type: 'object',
@@ -208,6 +260,12 @@ export function registerWebMcpTools(): WebMcpRuntime {
           jobType: { type: 'string' },
           limit: { type: 'number' },
         },
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
       },
       execute: (input = {}) => {
         const jobs = searchJobs({
@@ -229,6 +287,7 @@ export function registerWebMcpTools(): WebMcpRuntime {
     },
     {
       name: 'get_job_details',
+      title: 'Get Job Details',
       description: 'Fetch a single job posting with responsibilities, requirements, and fit score.',
       inputSchema: {
         type: 'object',
@@ -236,6 +295,12 @@ export function registerWebMcpTools(): WebMcpRuntime {
           jobId: { type: 'string' },
         },
         required: ['jobId'],
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
       },
       execute: (input = {}) => {
         const jobId = String(input.jobId ?? '')
@@ -257,6 +322,7 @@ export function registerWebMcpTools(): WebMcpRuntime {
     },
     {
       name: 'draft_application',
+      title: 'Draft Application',
       description: 'Create a draft application tailored to the selected role and profile.',
       inputSchema: {
         type: 'object',
@@ -264,6 +330,12 @@ export function registerWebMcpTools(): WebMcpRuntime {
           jobId: { type: 'string' },
         },
         required: ['jobId'],
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
       },
       execute: (input = {}) => {
         const jobId = String(input.jobId ?? '')
@@ -281,6 +353,7 @@ export function registerWebMcpTools(): WebMcpRuntime {
     },
     {
       name: 'submit_application',
+      title: 'Submit Application',
       description: 'Submit an application after user approval.',
       inputSchema: {
         type: 'object',
@@ -288,6 +361,12 @@ export function registerWebMcpTools(): WebMcpRuntime {
           applicationId: { type: 'string' },
         },
         required: ['applicationId'],
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
       },
       execute: (input = {}) => {
         const applicationId = String(input.applicationId ?? '')
