@@ -1,16 +1,19 @@
 import { createApplication, getApplications, getApplicationById, submitApplication, validateApplication } from './services/applicationService'
 import { getJobDetails, searchJobs } from './services/jobService'
 
-export type WebMcpStatus = { found: boolean; registered: string[] }
+export type WebMcpStatus = { found: boolean; registered: string[]; error?: string }
 const statusEvent = 'applyflow:webmcp-status'
-let currentStatus: WebMcpStatus = { found: false, registered: [] }
+let currentStatus: WebMcpStatus = { found: false, registered: [], error: 'Waiting for native WebMCP support.' }
 
 declare global {
   interface Navigator { modelContext?: ModelContext }
   interface Document { modelContext?: ModelContext }
 }
 
-type ModelContext = { registerTool: (tool: WebMcpTool, options?: { signal?: AbortSignal }) => Promise<void> }
+type ModelContext = {
+  registerTool: (tool: WebMcpTool, options?: { signal?: AbortSignal }) => Promise<void>
+  getTools: () => Promise<Array<{ name?: string }>>
+}
 type WebMcpTool = {
   name: string
   description: string
@@ -22,6 +25,26 @@ type WebMcpTool = {
 function publishStatus(status: WebMcpStatus) {
   currentStatus = status
   if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(statusEvent, { detail: status }))
+}
+
+const registrationKey = Symbol.for('applyflow.webmcp-registration')
+type RegistrationState = { context: ModelContext; promise: Promise<void> }
+
+function getNativeModelContext(): ModelContext | undefined {
+  const context = typeof document !== 'undefined'
+    ? document.modelContext ?? (typeof navigator !== 'undefined' ? navigator.modelContext : undefined)
+    : undefined
+  return context && typeof context.registerTool === 'function' && typeof context.getTools === 'function' ? context : undefined
+}
+
+async function waitForNativeModelContext(timeoutMs = 10000): Promise<ModelContext> {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    const context = getNativeModelContext()
+    if (context) return context
+    await new Promise((resolve) => window.setTimeout(resolve, 100))
+  }
+  throw new Error('Native WebMCP/modelContext was not available within 10 seconds.')
 }
 
 export function getWebMcpStatus(): WebMcpStatus { return currentStatus }
@@ -117,22 +140,41 @@ function defineTools(): WebMcpTool[] {
 }
 
 export async function registerWebMcpTools(): Promise<void> {
-  const modelContext = typeof document !== 'undefined' ? document.modelContext ?? (typeof navigator !== 'undefined' ? navigator.modelContext : undefined) : undefined
-  if (!modelContext || !('registerTool' in modelContext)) {
-    publishStatus({ found: false, registered: [] })
-    return
-  }
-  const controller = new AbortController()
-  const registered: string[] = []
-  for (const tool of defineTools()) {
-    try {
-      await modelContext.registerTool(tool, { signal: controller.signal })
-      registered.push(tool.name)
-    } catch {
-      publishStatus({ found: true, registered: [...registered] })
-      continue
+  if (typeof window === 'undefined') return
+
+  try {
+    const modelContext = await waitForNativeModelContext()
+    const globalState = globalThis as typeof globalThis & { [registrationKey]?: RegistrationState }
+    const existing = globalState[registrationKey]
+    if (existing?.context === modelContext) {
+      await existing.promise
+      const registered = (await modelContext.getTools())
+        .map((tool) => tool.name)
+        .filter((name): name is string => Boolean(name))
+      publishStatus({ found: true, registered })
+      return
     }
-    publishStatus({ found: true, registered: [...registered] })
+
+    const promise = (async () => {
+      const controller = new AbortController()
+      for (const tool of defineTools()) {
+        await modelContext.registerTool(tool, { signal: controller.signal })
+      }
+
+      const registered = (await modelContext.getTools())
+        .map((tool) => tool.name)
+        .filter((name): name is string => Boolean(name))
+      publishStatus({ found: true, registered })
+      console.info('[ApplyFlow] WebMCP tools registered:', registered)
+    })()
+
+    globalState[registrationKey] = { context: modelContext, promise }
+    await promise
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const found = Boolean(getNativeModelContext())
+    publishStatus({ found, registered: [], error: message })
+    console.error('[ApplyFlow] WebMCP initialization failed:', error)
   }
 }
 

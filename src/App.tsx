@@ -14,6 +14,7 @@ function App() {
 
   return (
     <BrowserRouter>
+      <WebMcpDiagnostic />
       <Routes>
         <Route path="/auth" element={<AuthPage />} />
         <Route path="/" element={currentUser ? <DashboardPage /> : <AuthPage />} />
@@ -27,6 +28,26 @@ function App() {
         <Route path="/apply/:jobId/submitted" element={currentUser ? <SubmittedPage /> : <AuthPage />} />
       </Routes>
     </BrowserRouter>
+  )
+}
+
+function WebMcpDiagnostic() {
+  const [status, setStatus] = useState(getWebMcpStatus)
+
+  useEffect(() => subscribeToWebMcpStatus(setStatus), [])
+
+  return (
+    <aside className={`webmcp-diagnostic ${status.error ? 'has-error' : 'is-ready'}`} aria-label="WebMCP diagnostic">
+      <div className="webmcp-diagnostic-header">
+        <strong>WebMCP diagnostic</strong>
+        <span>{status.found ? 'Native support detected' : 'Native support not detected'}</span>
+      </div>
+      <div className="webmcp-diagnostic-tools">
+        <span>Registry ({status.registered.length})</span>
+        <code>{status.registered.length ? status.registered.join(', ') : 'No tools returned by getTools()'}</code>
+      </div>
+      {status.error && <div className="webmcp-diagnostic-error">{status.error}</div>}
+    </aside>
   )
 }
 
@@ -797,7 +818,6 @@ function SettingsPage() {
 }
 
 function AppShell({ children }: { children: React.ReactNode }) {
-  const [webMcpStatus, setWebMcpStatus] = useState(getWebMcpStatus)
   const location = useLocation()
   const navItems = [
     { label: 'Dashboard', path: '/' },
@@ -806,8 +826,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
     { label: 'Profile', path: '/profile' },
   ]
   const currentUser = getCurrentUser()
-
-  useEffect(() => subscribeToWebMcpStatus(setWebMcpStatus), [])
 
   return (
     <div className="app-shell">
@@ -848,9 +866,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
               Logout
             </button>
             <span className="demo-badge">DEMO MODE</span>
-            <span className={`webmcp-status ${webMcpStatus.found ? 'available' : 'unavailable'}`} title={webMcpStatus.registered.join(', ') || 'No tools registered'}>
-              WebMCP {webMcpStatus.found ? `${webMcpStatus.registered.length} tools` : 'unavailable'}
-            </span>
           </div>
         </header>
         <div className="page-body">{children}</div>
