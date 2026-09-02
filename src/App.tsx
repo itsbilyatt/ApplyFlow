@@ -9,7 +9,9 @@ import type { Application, ApplicationFormData, Job } from './types'
 import { invokeWebMcpTool, registerWebMcpTools } from './webmcp'
 import { getCurrentUser, loginUser, logoutUser, signupUser } from './auth'
 
-registerWebMcpTools()
+if (typeof document !== 'undefined' && 'modelContext' in document) {
+  void registerWebMcpTools()
+}
 
 function App() {
   const currentUser = getCurrentUser()

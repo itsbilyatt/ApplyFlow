@@ -43,12 +43,13 @@ export type WebMcpToolSummary = {
 }
 
 export type WebMcpRuntime = {
-  registerTool: (tool: WebMcpTool) => void
-  getTools: () => WebMcpToolSummary[]
-  listTools: () => WebMcpToolSummary[]
+  registerTool: (tool: WebMcpTool) => Promise<void> | void
+  getTools: () => Promise<WebMcpToolSummary[]> | WebMcpToolSummary[]
+  listTools: () => Promise<WebMcpToolSummary[]> | WebMcpToolSummary[]
   getTool: (name: string) => WebMcpTool | undefined
   callTool: (name: string, input?: WebMcpToolInput) => Promise<any> | any
   invokeTool: (name: string, input?: WebMcpToolInput) => Promise<any> | any
+  executeTool?: (tool: WebMcpTool | string, input?: WebMcpToolInput) => Promise<any> | any
 }
 
 declare global {
@@ -58,6 +59,16 @@ declare global {
 }
 
 const fallbackToolMap = new Map<string, WebMcpTool>()
+
+function summarizeTool(tool: WebMcpTool): WebMcpToolSummary {
+  return {
+    name: tool.name,
+    title: tool.title,
+    description: tool.description,
+    inputSchema: tool.inputSchema,
+    annotations: tool.annotations,
+  }
+}
 
 function normalizeString(value: unknown, fallback = ''): string {
   if (typeof value === 'string') return value.trim()
@@ -88,13 +99,7 @@ function ensureRuntime(): WebMcpRuntime {
     const runtime = document.modelContext
 
     if (typeof runtime.getTools !== 'function') {
-      runtime.getTools = () => Array.from(fallbackToolMap.values()).map(({ name, title, description, inputSchema, annotations }) => ({
-        name,
-        title,
-        description,
-        inputSchema,
-        annotations,
-      }))
+      runtime.getTools = () => Array.from(fallbackToolMap.values()).map(summarizeTool)
     }
 
     if (typeof runtime.listTools !== 'function') {
@@ -126,6 +131,17 @@ function ensureRuntime(): WebMcpRuntime {
       }
     }
 
+    if (typeof runtime.executeTool !== 'function') {
+      runtime.executeTool = async (toolOrName, input = {}) => {
+        const tool = typeof toolOrName === 'string' ? runtime.getTool(toolOrName) : toolOrName
+        if (!tool) {
+          throw new Error('Tool not found.')
+        }
+
+        return tool.execute(input)
+      }
+    }
+
     return runtime
   }
 
@@ -133,20 +149,8 @@ function ensureRuntime(): WebMcpRuntime {
     registerTool: (tool) => {
       fallbackToolMap.set(tool.name, tool)
     },
-    getTools: () => Array.from(fallbackToolMap.values()).map(({ name, title, description, inputSchema, annotations }) => ({
-      name,
-      title,
-      description,
-      inputSchema,
-      annotations,
-    })),
-    listTools: () => Array.from(fallbackToolMap.values()).map(({ name, title, description, inputSchema, annotations }) => ({
-      name,
-      title,
-      description,
-      inputSchema,
-      annotations,
-    })),
+    getTools: () => Array.from(fallbackToolMap.values()).map(summarizeTool),
+    listTools: () => Array.from(fallbackToolMap.values()).map(summarizeTool),
     getTool: (name) => fallbackToolMap.get(name),
     callTool: async (name, input = {}) => {
       const tool = fallbackToolMap.get(name)
@@ -164,6 +168,14 @@ function ensureRuntime(): WebMcpRuntime {
 
       return tool.execute(input)
     },
+    executeTool: async (toolOrName, input = {}) => {
+      const tool = typeof toolOrName === 'string' ? fallbackToolMap.get(toolOrName) : toolOrName
+      if (!tool) {
+        throw new Error('Tool not found.')
+      }
+
+      return tool.execute(input)
+    },
   }
 
   if (typeof document !== 'undefined') {
@@ -173,10 +185,9 @@ function ensureRuntime(): WebMcpRuntime {
   return runtime
 }
 
-export function registerWebMcpTools(): WebMcpRuntime {
+export async function registerWebMcpTools(): Promise<WebMcpRuntime> {
   const runtime = ensureRuntime()
-
-  const existingNames = new Set(runtime.getTools().map((tool) => tool.name))
+  const existingNames = new Set((await Promise.resolve(runtime.getTools())).map((tool) => tool.name))
   const tools: WebMcpTool[] = [
     {
       name: 'login_user',
@@ -532,7 +543,7 @@ export function registerWebMcpTools(): WebMcpRuntime {
 
   for (const tool of tools) {
     if (!existingNames.has(tool.name)) {
-      runtime.registerTool(tool)
+      await Promise.resolve(runtime.registerTool(tool))
       existingNames.add(tool.name)
     }
   }
@@ -552,6 +563,7 @@ export async function invokeWebMcpTool(name: string, input: WebMcpToolInput = {}
   return tool.execute(input)
 }
 
-export function getRegisteredWebMcpTools(): WebMcpToolSummary[] {
-  return ensureRuntime().getTools()
+export async function getRegisteredWebMcpTools(): Promise<WebMcpToolSummary[]> {
+  const runtime = ensureRuntime()
+  return await Promise.resolve(runtime.getTools())
 }
