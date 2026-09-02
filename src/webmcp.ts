@@ -43,7 +43,10 @@ export type WebMcpToolSummary = {
 }
 
 export type WebMcpRuntime = {
-  registerTool: (tool: WebMcpTool) => Promise<void> | void
+  registerTool: (tool: WebMcpTool, options?: { signal?: AbortSignal }) => Promise<void> | void
+  unregisterTool?: (name: string) => Promise<void> | void
+  provideContext?: (options: { tools: WebMcpTool[] }) => Promise<void> | void
+  clearContext?: () => Promise<void> | void
   getTools: () => Promise<WebMcpToolSummary[]> | WebMcpToolSummary[]
   listTools: () => Promise<WebMcpToolSummary[]> | WebMcpToolSummary[]
   getTool: (name: string) => WebMcpTool | undefined
@@ -52,7 +55,15 @@ export type WebMcpRuntime = {
   executeTool?: (tool: WebMcpTool | string, input?: WebMcpToolInput) => Promise<any> | any
 }
 
+// The current WebMCP draft (and Chrome's native early-preview implementation)
+// exposes the registry on `navigator.modelContext`. Some polyfills instead
+// expose it on `document.modelContext`. We declare both and mirror the same
+// runtime instance onto whichever surfaces are present so agents checking
+// either one can discover our tools.
 declare global {
+  interface Navigator {
+    modelContext?: WebMcpRuntime
+  }
   interface Document {
     modelContext?: WebMcpRuntime
   }
@@ -94,9 +105,65 @@ function setSavedJobs(savedJobs: string[]) {
   window.localStorage.setItem('applyflow-saved-jobs', JSON.stringify(savedJobs))
 }
 
+function buildFallbackRuntime(): WebMcpRuntime {
+  return {
+    registerTool: (tool) => {
+      fallbackToolMap.set(tool.name, tool)
+    },
+    unregisterTool: (name) => {
+      fallbackToolMap.delete(name)
+    },
+    provideContext: (options) => {
+      fallbackToolMap.clear()
+      for (const tool of options?.tools ?? []) {
+        fallbackToolMap.set(tool.name, tool)
+      }
+    },
+    clearContext: () => {
+      fallbackToolMap.clear()
+    },
+    getTools: () => Array.from(fallbackToolMap.values()).map(summarizeTool),
+    listTools: () => Array.from(fallbackToolMap.values()).map(summarizeTool),
+    getTool: (name) => fallbackToolMap.get(name),
+    callTool: async (name, input = {}) => {
+      const tool = fallbackToolMap.get(name)
+      if (!tool) {
+        throw new Error(`Tool "${name}" is not registered.`)
+      }
+
+      return tool.execute(input)
+    },
+    invokeTool: async (name, input = {}) => {
+      const tool = fallbackToolMap.get(name)
+      if (!tool) {
+        throw new Error(`Tool "${name}" is not registered.`)
+      }
+
+      return tool.execute(input)
+    },
+    executeTool: async (toolOrName, input = {}) => {
+      const tool = typeof toolOrName === 'string' ? fallbackToolMap.get(toolOrName) : toolOrName
+      if (!tool) {
+        throw new Error('Tool not found.')
+      }
+
+      return tool.execute(input)
+    },
+  }
+}
+
 function ensureRuntime(): WebMcpRuntime {
-  if (typeof document !== 'undefined' && document.modelContext) {
-    const runtime = document.modelContext
+  // Prefer whichever surface already has a real runtime installed (e.g. a
+  // browser's native WebMCP implementation or an extension-provided
+  // polyfill). Historically this app only ever looked at
+  // `document.modelContext`, which meant tools were invisible to any agent
+  // that follows the more common `navigator.modelContext` convention.
+  const existing: WebMcpRuntime | undefined =
+    (typeof navigator !== 'undefined' ? navigator.modelContext : undefined) ??
+    (typeof document !== 'undefined' ? document.modelContext : undefined)
+
+  if (existing) {
+    const runtime = existing
 
     if (typeof runtime.getTools !== 'function') {
       runtime.getTools = () => Array.from(fallbackToolMap.values()).map(summarizeTool)
@@ -131,6 +198,27 @@ function ensureRuntime(): WebMcpRuntime {
       }
     }
 
+    if (typeof runtime.unregisterTool !== 'function') {
+      runtime.unregisterTool = (name) => {
+        fallbackToolMap.delete(name)
+      }
+    }
+
+    if (typeof runtime.provideContext !== 'function') {
+      runtime.provideContext = (options) => {
+        fallbackToolMap.clear()
+        for (const tool of options?.tools ?? []) {
+          fallbackToolMap.set(tool.name, tool)
+        }
+      }
+    }
+
+    if (typeof runtime.clearContext !== 'function') {
+      runtime.clearContext = () => {
+        fallbackToolMap.clear()
+      }
+    }
+
     if (typeof runtime.executeTool !== 'function') {
       runtime.executeTool = async (toolOrName, input = {}) => {
         const tool = typeof toolOrName === 'string' ? runtime.getTool(toolOrName) : toolOrName
@@ -142,42 +230,25 @@ function ensureRuntime(): WebMcpRuntime {
       }
     }
 
+    // Mirror the SAME runtime instance onto both discovery surfaces. Patching
+    // methods independently onto two different objects (the previous
+    // behavior) meant registerTool could write into one runtime's storage
+    // while getTools() read from a different, empty one.
+    if (typeof navigator !== 'undefined' && navigator.modelContext !== runtime) {
+      navigator.modelContext = runtime
+    }
+    if (typeof document !== 'undefined' && document.modelContext !== runtime) {
+      document.modelContext = runtime
+    }
+
     return runtime
   }
 
-  const runtime: WebMcpRuntime = {
-    registerTool: (tool) => {
-      fallbackToolMap.set(tool.name, tool)
-    },
-    getTools: () => Array.from(fallbackToolMap.values()).map(summarizeTool),
-    listTools: () => Array.from(fallbackToolMap.values()).map(summarizeTool),
-    getTool: (name) => fallbackToolMap.get(name),
-    callTool: async (name, input = {}) => {
-      const tool = fallbackToolMap.get(name)
-      if (!tool) {
-        throw new Error(`Tool "${name}" is not registered.`)
-      }
+  const runtime = buildFallbackRuntime()
 
-      return tool.execute(input)
-    },
-    invokeTool: async (name, input = {}) => {
-      const tool = fallbackToolMap.get(name)
-      if (!tool) {
-        throw new Error(`Tool "${name}" is not registered.`)
-      }
-
-      return tool.execute(input)
-    },
-    executeTool: async (toolOrName, input = {}) => {
-      const tool = typeof toolOrName === 'string' ? fallbackToolMap.get(toolOrName) : toolOrName
-      if (!tool) {
-        throw new Error('Tool not found.')
-      }
-
-      return tool.execute(input)
-    },
+  if (typeof navigator !== 'undefined') {
+    navigator.modelContext = runtime
   }
-
   if (typeof document !== 'undefined') {
     document.modelContext = runtime
   }
