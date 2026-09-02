@@ -1,681 +1,138 @@
-import { createApplication, getApplications, submitApplication } from './services/applicationService'
+import { createApplication, getApplications, getApplicationById, submitApplication, validateApplication } from './services/applicationService'
 import { getJobDetails, searchJobs } from './services/jobService'
-import { getCandidateProfile } from './services/candidateService'
-import { loginUser, signupUser, getCurrentUser, logoutUser } from './auth'
-import type { Job } from './types'
 
-export type WebMcpToolInput = Record<string, any>
+export type WebMcpStatus = { found: boolean; registered: string[] }
+const statusEvent = 'applyflow:webmcp-status'
+let currentStatus: WebMcpStatus = { found: false, registered: [] }
 
-export type WebMcpToolAnnotations = {
-  readOnlyHint?: boolean
-  destructiveHint?: boolean
-  idempotentHint?: boolean
-  openWorldHint?: boolean
-}
-
-export type WebMcpToolSchemaProperty = {
-  type: string
-  description?: string
-}
-
-export type WebMcpToolInputSchema = {
-  type: 'object'
-  properties: Record<string, WebMcpToolSchemaProperty>
-  required?: string[]
-  additionalProperties?: boolean
-}
-
-export type WebMcpTool = {
-  name: string
-  title?: string
-  description: string
-  inputSchema: WebMcpToolInputSchema
-  annotations?: WebMcpToolAnnotations
-  execute: (input: WebMcpToolInput) => Promise<any> | any
-}
-
-export type WebMcpToolSummary = {
-  name: string
-  title?: string
-  description: string
-  inputSchema: WebMcpToolInputSchema
-  annotations?: WebMcpToolAnnotations
-}
-
-export type WebMcpRuntime = {
-  registerTool: (tool: WebMcpTool, options?: { signal?: AbortSignal }) => Promise<void> | void
-  unregisterTool?: (name: string) => Promise<void> | void
-  provideContext?: (options: { tools: WebMcpTool[] }) => Promise<void> | void
-  clearContext?: () => Promise<void> | void
-  getTools: () => Promise<WebMcpToolSummary[]> | WebMcpToolSummary[]
-  listTools: () => Promise<WebMcpToolSummary[]> | WebMcpToolSummary[]
-  getTool: (name: string) => WebMcpTool | undefined
-  callTool: (name: string, input?: WebMcpToolInput) => Promise<any> | any
-  invokeTool: (name: string, input?: WebMcpToolInput) => Promise<any> | any
-  executeTool?: (tool: WebMcpTool | string, input?: WebMcpToolInput) => Promise<any> | any
-}
-
-// The current WebMCP draft (and Chrome's native early-preview implementation)
-// exposes the registry on `navigator.modelContext`. Some polyfills instead
-// expose it on `document.modelContext`. We declare both and mirror the same
-// runtime instance onto whichever surfaces are present so agents checking
-// either one can discover our tools.
 declare global {
-  interface Navigator {
-    modelContext?: WebMcpRuntime
-  }
-  interface Document {
-    modelContext?: WebMcpRuntime
-  }
+  interface Navigator { modelContext?: ModelContext }
+  interface Document { modelContext?: ModelContext }
 }
 
-const fallbackToolMap = new Map<string, WebMcpTool>()
-
-function summarizeTool(tool: WebMcpTool): WebMcpToolSummary {
-  return {
-    name: tool.name,
-    title: tool.title,
-    description: tool.description,
-    inputSchema: tool.inputSchema,
-    annotations: tool.annotations,
-  }
+type ModelContext = { registerTool: (tool: WebMcpTool, options?: { signal?: AbortSignal }) => Promise<void> }
+type WebMcpTool = {
+  name: string
+  description: string
+  inputSchema: { type: 'object'; properties: Record<string, { type: string; description: string }>; required?: string[]; additionalProperties?: boolean }
+  execute: (input: Record<string, unknown>) => unknown | Promise<unknown>
+  annotations?: { readOnlyHint?: boolean }
 }
 
-function normalizeString(value: unknown, fallback = ''): string {
-  if (typeof value === 'string') return value.trim()
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
-  return fallback
+function publishStatus(status: WebMcpStatus) {
+  currentStatus = status
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(statusEvent, { detail: status }))
 }
 
-function getSavedJobs(): string[] {
-  if (typeof window === 'undefined') return []
+export function getWebMcpStatus(): WebMcpStatus { return currentStatus }
 
-  try {
-    const raw = window.localStorage.getItem('applyflow-saved-jobs')
-    if (!raw) return []
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : []
-  } catch {
-    return []
-  }
+export function subscribeToWebMcpStatus(listener: (status: WebMcpStatus) => void) {
+  const handleStatus = (event: Event) => listener((event as CustomEvent<WebMcpStatus>).detail)
+  window.addEventListener(statusEvent, handleStatus)
+  return () => window.removeEventListener(statusEvent, handleStatus)
 }
 
-function setSavedJobs(savedJobs: string[]) {
-  if (typeof window === 'undefined') return
-  window.localStorage.setItem('applyflow-saved-jobs', JSON.stringify(savedJobs))
+function requiredString(input: Record<string, unknown>, key: string): string {
+  const value = input[key]
+  if (typeof value !== 'string' || !value.trim()) throw new Error(`The ${key} is required. Retry with a non-empty ${key} string.`)
+  return value.trim()
 }
 
-function buildFallbackRuntime(): WebMcpRuntime {
-  return {
-    registerTool: (tool) => {
-      fallbackToolMap.set(tool.name, tool)
-    },
-    unregisterTool: (name) => {
-      fallbackToolMap.delete(name)
-    },
-    provideContext: (options) => {
-      fallbackToolMap.clear()
-      for (const tool of options?.tools ?? []) {
-        fallbackToolMap.set(tool.name, tool)
-      }
-    },
-    clearContext: () => {
-      fallbackToolMap.clear()
-    },
-    getTools: () => Array.from(fallbackToolMap.values()).map(summarizeTool),
-    listTools: () => Array.from(fallbackToolMap.values()).map(summarizeTool),
-    getTool: (name) => fallbackToolMap.get(name),
-    callTool: async (name, input = {}) => {
-      const tool = fallbackToolMap.get(name)
-      if (!tool) {
-        throw new Error(`Tool "${name}" is not registered.`)
-      }
-
-      return tool.execute(input)
-    },
-    invokeTool: async (name, input = {}) => {
-      const tool = fallbackToolMap.get(name)
-      if (!tool) {
-        throw new Error(`Tool "${name}" is not registered.`)
-      }
-
-      return tool.execute(input)
-    },
-    executeTool: async (toolOrName, input = {}) => {
-      const tool = typeof toolOrName === 'string' ? fallbackToolMap.get(toolOrName) : toolOrName
-      if (!tool) {
-        throw new Error('Tool not found.')
-      }
-
-      return tool.execute(input)
-    },
-  }
-}
-
-function ensureRuntime(): WebMcpRuntime {
-  // Prefer whichever surface already has a real runtime installed (e.g. a
-  // browser's native WebMCP implementation or an extension-provided
-  // polyfill). Historically this app only ever looked at
-  // `document.modelContext`, which meant tools were invisible to any agent
-  // that follows the more common `navigator.modelContext` convention.
-  const existing: WebMcpRuntime | undefined =
-    (typeof navigator !== 'undefined' ? navigator.modelContext : undefined) ??
-    (typeof document !== 'undefined' ? document.modelContext : undefined)
-
-  if (existing) {
-    const runtime = existing
-
-    if (typeof runtime.getTools !== 'function') {
-      runtime.getTools = () => Array.from(fallbackToolMap.values()).map(summarizeTool)
-    }
-
-    if (typeof runtime.listTools !== 'function') {
-      runtime.listTools = () => runtime.getTools()
-    }
-
-    if (typeof runtime.getTool !== 'function') {
-      runtime.getTool = (name) => fallbackToolMap.get(name)
-    }
-
-    if (typeof runtime.callTool !== 'function') {
-      runtime.callTool = async (name, input = {}) => {
-        const tool = runtime.getTool(name)
-        if (!tool) {
-          throw new Error(`Tool "${name}" is not registered.`)
-        }
-
-        return tool.execute(input)
-      }
-    }
-
-    if (typeof runtime.invokeTool !== 'function') {
-      runtime.invokeTool = runtime.callTool.bind(runtime)
-    }
-
-    if (typeof runtime.registerTool !== 'function') {
-      runtime.registerTool = (tool) => {
-        fallbackToolMap.set(tool.name, tool)
-      }
-    }
-
-    if (typeof runtime.unregisterTool !== 'function') {
-      runtime.unregisterTool = (name) => {
-        fallbackToolMap.delete(name)
-      }
-    }
-
-    if (typeof runtime.provideContext !== 'function') {
-      runtime.provideContext = (options) => {
-        fallbackToolMap.clear()
-        for (const tool of options?.tools ?? []) {
-          fallbackToolMap.set(tool.name, tool)
-        }
-      }
-    }
-
-    if (typeof runtime.clearContext !== 'function') {
-      runtime.clearContext = () => {
-        fallbackToolMap.clear()
-      }
-    }
-
-    if (typeof runtime.executeTool !== 'function') {
-      runtime.executeTool = async (toolOrName, input = {}) => {
-        const tool = typeof toolOrName === 'string' ? runtime.getTool(toolOrName) : toolOrName
-        if (!tool) {
-          throw new Error('Tool not found.')
-        }
-
-        return tool.execute(input)
-      }
-    }
-
-    // Mirror the SAME runtime instance onto both discovery surfaces. Patching
-    // methods independently onto two different objects (the previous
-    // behavior) meant registerTool could write into one runtime's storage
-    // while getTools() read from a different, empty one.
-    if (typeof navigator !== 'undefined' && navigator.modelContext !== runtime) {
-      navigator.modelContext = runtime
-    }
-    if (typeof document !== 'undefined' && document.modelContext !== runtime) {
-      document.modelContext = runtime
-    }
-
-    return runtime
-  }
-
-  const runtime = buildFallbackRuntime()
-
-  if (typeof navigator !== 'undefined') {
-    navigator.modelContext = runtime
-  }
-  if (typeof document !== 'undefined') {
-    document.modelContext = runtime
-  }
-
-  return runtime
-}
-
-export async function registerWebMcpTools(): Promise<WebMcpRuntime> {
-  const runtime = ensureRuntime()
-  const existingNames = new Set((await Promise.resolve(runtime.getTools())).map((tool) => tool.name))
-  const tools: WebMcpTool[] = [
-    {
-      name: 'login_user',
-      title: 'Login User',
-      description: 'Authenticate an existing ApplyFlow user with their email and password so the browser session can be used normally.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          email: { type: 'string', description: 'Registered email address for the ApplyFlow account.' },
-          password: { type: 'string', description: 'Password for the matching user account.' },
-        },
-        required: ['email', 'password'],
-        additionalProperties: false,
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-      execute: (input = {}) => {
-        const result = loginUser({
-          email: normalizeString(input.email),
-          password: normalizeString(input.password),
-        })
-
-        return {
-          tool: 'login_user',
-          success: result.success,
-          message: result.message,
-          user: result.user ?? null,
-        }
-      },
-    },
-    {
-      name: 'signup_user',
-      title: 'Sign Up User',
-      description: 'Create a new ApplyFlow account and immediately sign the user in so they can browse jobs and submit applications.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          name: { type: 'string', description: 'Full name for the new account.' },
-          email: { type: 'string', description: 'Email address that will be used to sign in.' },
-          password: { type: 'string', description: 'Password with at least 6 characters.' },
-        },
-        required: ['name', 'email', 'password'],
-        additionalProperties: false,
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-      execute: (input = {}) => {
-        const result = signupUser({
-          name: normalizeString(input.name),
-          email: normalizeString(input.email),
-          password: normalizeString(input.password),
-        })
-
-        return {
-          tool: 'signup_user',
-          success: result.success,
-          message: result.message,
-          user: result.user ?? null,
-        }
-      },
-    },
-    {
-      name: 'get_current_user',
-      title: 'Get Current User',
-      description: 'Return the currently logged-in ApplyFlow user from the browser session so the agent can operate with the same authenticated identity.',
-      inputSchema: {
-        type: 'object',
-        properties: {},
-        additionalProperties: false,
-      },
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-      execute: () => ({
-        tool: 'get_current_user',
-        user: getCurrentUser(),
-      }),
-    },
-    {
-      name: 'logout_user',
-      title: 'Log Out User',
-      description: 'Sign the current session out of ApplyFlow and clear the authenticated browser state.',
-      inputSchema: {
-        type: 'object',
-        properties: {},
-        additionalProperties: false,
-      },
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-      execute: () => {
-        logoutUser()
-        return {
-          tool: 'logout_user',
-          success: true,
-          message: 'User logged out successfully.',
-        }
-      },
-    },
+// Add a tool by copying one of the entries below: keep the service call in
+// execute, describe every input, and publish state changes to the UI.
+function defineTools(): WebMcpTool[] {
+  return [
     {
       name: 'search_jobs',
-      title: 'Search Jobs',
-      description: 'Search available job opportunities by keyword and location. Returns matching jobs with title, company, location, salary, and job ID.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          keyword: { type: 'string', description: 'Job title, company, skill, or keyword to search for.' },
-          location: { type: 'string', description: 'Location to filter by, such as Pune, Hyderabad, or Remote.' },
-          experience: { type: 'string', description: 'Minimum required experience level, such as 3+ years or Any.' },
-          workMode: { type: 'string', description: 'Work mode filter such as Hybrid, Remote, or On-site.' },
-          salary: { type: 'string', description: 'Salary threshold such as ₹20L+ or Any.' },
-          limit: { type: 'number', description: 'Maximum number of results to return.' },
-        },
-        required: ['keyword'],
-        additionalProperties: false,
+      description: 'Search and filter available jobs by keyword and optional criteria. Choose this for discovering opportunities; use get_job_details for one known job.',
+      inputSchema: { type: 'object', properties: {
+        query: { type: 'string', description: 'Job title, company, skill, or location keyword.' },
+        location: { type: 'string', description: 'Exact location filter, or All.' },
+        experience: { type: 'string', description: 'Minimum experience filter such as 3+ or Any.' },
+        workMode: { type: 'string', description: 'Work mode filter such as Remote, Hybrid, or All.' },
+        salary: { type: 'string', description: 'Minimum salary filter such as ₹20L+ or Any.' },
+        jobType: { type: 'string', description: 'Job type filter such as Full-time or All.' },
+      }, required: ['query'], additionalProperties: false },
+      execute: async (input) => {
+        const query = requiredString(input, 'query')
+        const jobs = searchJobs({ query, location: typeof input.location === 'string' ? input.location : 'All', experience: typeof input.experience === 'string' ? input.experience : 'Any', workMode: typeof input.workMode === 'string' ? input.workMode : 'All', salary: typeof input.salary === 'string' ? input.salary : 'Any', jobType: typeof input.jobType === 'string' ? input.jobType : 'All' })
+        return { query, count: jobs.length, jobs }
       },
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-      execute: (input = {}) => {
-        const keyword = normalizeString(input.keyword ?? input.query, '')
-        const location = normalizeString(input.location, 'All')
-        const jobs = searchJobs({
-          query: keyword,
-          location,
-          experience: normalizeString(input.experience, 'Any'),
-          workMode: normalizeString(input.workMode, 'All'),
-          salary: normalizeString(input.salary, 'Any'),
-          jobType: normalizeString(input.jobType, 'All'),
-        })
-
-        const limit = Number(input.limit ?? jobs.length)
-        const safeLimit = Number.isFinite(limit) ? Math.max(0, Math.min(limit, jobs.length)) : jobs.length
-
-        return {
-          tool: 'search_jobs',
-          keyword,
-          location,
-          count: jobs.length,
-          results: jobs.slice(0, safeLimit),
-          jobs: jobs.slice(0, safeLimit),
-        }
-      },
+      annotations: { readOnlyHint: true },
     },
     {
       name: 'get_job_details',
-      title: 'Get Job Details',
-      description: 'Fetch one job posting by ID and return its responsibilities, requirements, salary, and matching details for a specific opportunity.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          jobId: { type: 'string', description: 'Unique ID of the job to retrieve, such as job-1.' },
-        },
-        required: ['jobId'],
-        additionalProperties: false,
-      },
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-      execute: (input = {}) => {
-        const jobId = normalizeString(input.jobId)
+      description: 'Return full details for one job by ID, including responsibilities and requirements. Choose this after search_jobs identifies a specific opportunity.',
+      inputSchema: { type: 'object', properties: { jobId: { type: 'string', description: 'Unique job ID such as job-1.' } }, required: ['jobId'], additionalProperties: false },
+      execute: async (input) => {
+        const jobId = requiredString(input, 'jobId')
         const job = getJobDetails(jobId)
-
-        if (!job) {
-          return {
-            tool: 'get_job_details',
-            success: false,
-            job: null,
-            jobId,
-            message: `No job found for ${jobId}`,
-          }
-        }
-
-        return {
-          tool: 'get_job_details',
-          success: true,
-          job,
-          jobId: job.id,
-        }
+        if (!job) throw new Error(`No job was found for ${jobId}. Retry with an ID returned by search_jobs.`)
+        return { jobId, job }
+      },
+      annotations: { readOnlyHint: true },
+    },
+    {
+      name: 'draft_application',
+      description: 'Create a saved draft application for a job using the existing flow. Choose this to prepare an application for user review; it does not submit it.',
+      inputSchema: { type: 'object', properties: { jobId: { type: 'string', description: 'Unique job ID to prepare an application for.' } }, required: ['jobId'], additionalProperties: false },
+      execute: async (input) => {
+        const jobId = requiredString(input, 'jobId')
+        if (!getJobDetails(jobId)) throw new Error(`No job was found for ${jobId}. Retry with an ID returned by search_jobs.`)
+        const existing = getApplications().find((application) => application.jobId === jobId && application.draft)
+        const application = existing ?? createApplication(jobId)
+        publishStatus({ ...currentStatus })
+        return { applicationId: application.id, jobId, status: application.status, created: !existing }
       },
     },
     {
-      name: 'get_my_profile',
-      title: 'Get My Profile',
-      description: 'Return the current candidate profile, skills, resume information, and contact details used by ApplyFlow to match and apply for jobs.',
-      inputSchema: {
-        type: 'object',
-        properties: {},
-        additionalProperties: false,
-      },
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-      execute: () => ({
-        tool: 'get_my_profile',
-        success: true,
-        profile: getCandidateProfile(),
-      }),
-    },
-    {
-      name: 'get_my_resumes',
-      title: 'Get My Resumes',
-      description: 'List the candidate resumes available in ApplyFlow so an application can be submitted using the correct resume document.',
-      inputSchema: {
-        type: 'object',
-        properties: {},
-        additionalProperties: false,
-      },
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-      execute: () => {
-        const profile = getCandidateProfile()
-        const resumes = [
-          {
-            resumeId: profile.resumeName,
-            name: profile.resumeName,
-            type: 'resume',
-            isDefault: true,
-            updatedAt: new Date().toISOString(),
-          },
-        ]
-
-        return {
-          tool: 'get_my_resumes',
-          success: true,
-          resumes,
-          count: resumes.length,
-        }
-      },
-    },
-    {
-      name: 'save_job',
-      title: 'Save Job',
-      description: 'Save a job to the user’s shortlist for later review. This is a personal bookmark action and does not submit an application.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          jobId: { type: 'string', description: 'Unique job ID to save for later.' },
-        },
-        required: ['jobId'],
-        additionalProperties: false,
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-      execute: (input = {}) => {
-        const jobId = normalizeString(input.jobId)
-        const job = getJobDetails(jobId)
-
-        if (!job) {
-          return {
-            tool: 'save_job',
-            success: false,
-            jobId,
-            message: `No job found for ${jobId}`,
-          }
-        }
-
-        const savedJobs = getSavedJobs()
-        const nextSavedJobs = savedJobs.includes(jobId) ? savedJobs : [...savedJobs, jobId]
-        setSavedJobs(nextSavedJobs)
-
-        return {
-          tool: 'save_job',
-          success: true,
-          jobId: job.id,
-          title: job.title,
-          company: job.company,
-          saved: true,
-          message: `Saved ${job.title} at ${job.company} for later.`,
-        }
-      },
-    },
-    {
-      name: 'apply_job',
-      title: 'Apply to Job',
-      description: 'Submit an application for a job using the user’s selected resume and the existing ApplyFlow application flow.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          jobId: { type: 'string', description: 'Unique ID of the job to apply for.' },
-          resumeId: { type: 'string', description: 'ID of the resume to use for this application.' },
-        },
-        required: ['jobId', 'resumeId'],
-        additionalProperties: false,
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-      execute: (input = {}) => {
-        const jobId = normalizeString(input.jobId)
-        const resumeId = normalizeString(input.resumeId, getCandidateProfile().resumeName)
-        const job = getJobDetails(jobId)
-
-        if (!job) {
-          return {
-            tool: 'apply_job',
-            success: false,
-            jobId,
-            resumeId,
-            message: `No job found for ${jobId}`,
-          }
-        }
-
-        const draft = createApplication(jobId)
-        const submitted = submitApplication(draft.id)
-
-        if (!submitted) {
-          return {
-            tool: 'apply_job',
-            success: false,
-            jobId,
-            resumeId,
-            message: `Application could not be submitted for ${job.title}.`,
-          }
-        }
-
-        return {
-          tool: 'apply_job',
-          success: true,
-          applicationId: submitted.id,
-          jobId: submitted.jobId,
-          resumeId,
-          status: submitted.status,
-          message: `Application submitted successfully for ${submitted.jobTitle}.`,
-        }
+      name: 'submit_application',
+      description: 'Submit one existing application after validation. Choose this only after the user reviewed and approved the draft; this changes application state.',
+      inputSchema: { type: 'object', properties: { applicationId: { type: 'string', description: 'Application ID of the reviewed draft.' } }, required: ['applicationId'], additionalProperties: false },
+      execute: async (input) => {
+        const applicationId = requiredString(input, 'applicationId')
+        if (!getApplicationById(applicationId)) throw new Error(`No application was found for ${applicationId}. Retry with an ID returned by draft_application.`)
+        const validation = validateApplication(applicationId)
+        if (!validation.valid) throw new Error(`Application is not ready. Fix: ${validation.issues.join('; ')}`)
+        const submitted = submitApplication(applicationId)
+        if (!submitted) throw new Error(`Application ${applicationId} could not be submitted. Retry after checking its status.`)
+        publishStatus({ ...currentStatus })
+        return { applicationId: submitted.id, jobId: submitted.jobId, status: submitted.status }
       },
     },
     {
       name: 'get_application_status',
-      title: 'Get Application Status',
-      description: 'Check the status of an application by application ID or by job ID so the agent can confirm whether an application was submitted or is still a draft.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          applicationId: { type: 'string', description: 'Application ID to look up.' },
-          jobId: { type: 'string', description: 'Job ID to find the related application.' },
-        },
-        additionalProperties: false,
+      description: 'Return application status records by application ID or job ID. Choose this to track progress after drafting or submitting.',
+      inputSchema: { type: 'object', properties: { applicationId: { type: 'string', description: 'Optional application ID to look up.' }, jobId: { type: 'string', description: 'Optional job ID to find applications for.' } }, additionalProperties: false },
+      execute: async (input) => {
+        const applicationId = typeof input.applicationId === 'string' ? input.applicationId.trim() : ''
+        const jobId = typeof input.jobId === 'string' ? input.jobId.trim() : ''
+        if (!applicationId && !jobId) throw new Error('Provide applicationId or jobId. Retry with one identifier.')
+        const applications = getApplications().filter((application) => (applicationId && application.id === applicationId) || (jobId && application.jobId === jobId))
+        return { applicationId, jobId, count: applications.length, applications: applications.map((application) => ({ applicationId: application.id, jobId: application.jobId, jobTitle: application.jobTitle, company: application.company, status: application.status, updatedAt: application.updatedAt })) }
       },
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-      execute: (input = {}) => {
-        const applicationId = normalizeString(input.applicationId, '')
-        const jobId = normalizeString(input.jobId, '')
-        const applications = getApplications()
-
-        const matches = applications.filter((application) => {
-          if (applicationId && application.id === applicationId) return true
-          if (jobId && application.jobId === jobId) return true
-          return false
-        })
-
-        return {
-          tool: 'get_application_status',
-          success: matches.length > 0,
-          count: matches.length,
-          applications: matches.map((application) => ({
-            applicationId: application.id,
-            jobId: application.jobId,
-            jobTitle: application.jobTitle,
-            company: application.company,
-            status: application.status,
-            updatedAt: application.updatedAt,
-          })),
-          message: matches.length ? 'Application status retrieved successfully.' : 'No matching application found.',
-        }
-      },
-    },
-    {
-      name: 'draft_application',
-      title: 'Draft Application',
-      description: 'Create or update a draft job application pre-filled from the candidate profile so it is ready for the user to review before submission.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          jobId: { type: 'string', description: 'Unique ID of the job to draft an application for.' },
-        },
-        required: ['jobId'],
-        additionalProperties: false,
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-      execute: (input = {}) => {
-        const jobId = normalizeString(input.jobId)
-        const job = getJobDetails(jobId)
-
-        if (!job) {
-          return {
-            tool: 'draft_application',
-            success: false,
-            jobId,
-            message: `No job found for ${jobId}`,
-          }
-        }
-
-        const existing = getApplications().find((application) => application.jobId === jobId && application.draft)
-        const draft = existing ?? createApplication(jobId)
-
-        return {
-          tool: 'draft_application',
-          success: true,
-          applicationId: draft.id,
-          jobId: draft.jobId,
-          jobTitle: draft.jobTitle,
-          company: draft.company,
-          status: draft.status,
-          message: `Prepared a draft application for ${draft.jobTitle} at ${draft.company}.`,
-        }
-      },
+      annotations: { readOnlyHint: true },
     },
   ]
+}
 
-  for (const tool of tools) {
-    if (!existingNames.has(tool.name)) {
-      await Promise.resolve(runtime.registerTool(tool))
-      existingNames.add(tool.name)
+export async function registerWebMcpTools(): Promise<void> {
+  const modelContext = typeof document !== 'undefined' ? document.modelContext ?? (typeof navigator !== 'undefined' ? navigator.modelContext : undefined) : undefined
+  if (!modelContext || !('registerTool' in modelContext)) {
+    publishStatus({ found: false, registered: [] })
+    return
+  }
+  const controller = new AbortController()
+  const registered: string[] = []
+  for (const tool of defineTools()) {
+    try {
+      await modelContext.registerTool(tool, { signal: controller.signal })
+      registered.push(tool.name)
+    } catch {
+      publishStatus({ found: true, registered: [...registered] })
+      continue
     }
+    publishStatus({ found: true, registered: [...registered] })
   }
-
-  return runtime
 }
 
-export async function invokeWebMcpTool(name: string, input: WebMcpToolInput = {}): Promise<any> {
-  const runtime = ensureRuntime()
-  const tool = runtime.getTool(name)
-
-  if (!tool) {
-    const method = typeof runtime.invokeTool === 'function' ? runtime.invokeTool : runtime.callTool
-    return method.call(runtime, name, input)
-  }
-
-  return tool.execute(input)
-}
-
-export async function getRegisteredWebMcpTools(): Promise<WebMcpToolSummary[]> {
-  const runtime = ensureRuntime()
-  return await Promise.resolve(runtime.getTools())
-}

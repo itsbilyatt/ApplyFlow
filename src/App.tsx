@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { BrowserRouter, Link, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { currentCandidate } from './data/candidates'
 import { jobs } from './data/jobs'
@@ -6,7 +6,7 @@ import { getApplications, getApplicationById, createApplication, updateApplicati
 import { getCandidateProfile } from './services/candidateService'
 import { getJobDetails, getRecommendedJobs, searchJobs } from './services/jobService'
 import type { Application, ApplicationFormData, Job } from './types'
-import { invokeWebMcpTool } from './webmcp'
+import { getWebMcpStatus, subscribeToWebMcpStatus } from './webmcp'
 import { getCurrentUser, loginUser, logoutUser, signupUser } from './auth'
 
 function App() {
@@ -125,13 +125,7 @@ function DashboardPage() {
             <div className="hero-actions">
               <Link to="/jobs" className="primary-button">Browse Jobs</Link>
               <button className="secondary-button" onClick={async () => {
-                const result = await invokeWebMcpTool('search_jobs', {
-                  query: 'oracle dba',
-                  location: 'Pune',
-                  limit: 3,
-                })
-                console.log('WebMCP search_jobs result:', result)
-                window.alert(`Agent found ${result.jobs.length} matching roles.`)
+                window.alert('Ask your connected AI agent to search jobs. WebMCP tools are available in the Model Context Tool Inspector.')
               }}>Run Agent</button>
             </div>
           </div>
@@ -283,17 +277,7 @@ function JobsPage() {
         <button
           className="primary-button"
           onClick={async () => {
-            const result = await invokeWebMcpTool('search_jobs', {
-              query,
-              location: filters.location === 'All' ? undefined : filters.location,
-              experience: filters.experience === 'Any' ? undefined : filters.experience,
-              workMode: filters.workMode === 'All' ? undefined : filters.workMode,
-              salary: filters.salary === 'Any' ? undefined : filters.salary,
-              jobType: filters.jobType === 'All' ? undefined : filters.jobType,
-              limit: 10,
-            })
-            console.log('WebMCP search result:', result)
-            window.alert(`Agent returned ${result.jobs.length} roles for your filters.`)
+            window.alert('Ask your connected AI agent to search jobs. WebMCP tools are available in the Model Context Tool Inspector.')
           }}
         >
           🤖 Find for me
@@ -605,9 +589,7 @@ function ApplicationPage() {
           </div>
           <button className="secondary-button full-width" onClick={async () => {
             if (!jobId) return
-            const result = await invokeWebMcpTool('draft_application', { jobId })
-            console.log('WebMCP draft_application result:', result)
-            window.alert(`Agent drafted application for ${result.jobTitle}.`)
+            window.alert('Ask your connected AI agent to draft this application. The draft will appear here for review.')
           }}>Ask Agent</button>
         </aside>
       </div>
@@ -815,6 +797,7 @@ function SettingsPage() {
 }
 
 function AppShell({ children }: { children: React.ReactNode }) {
+  const [webMcpStatus, setWebMcpStatus] = useState(getWebMcpStatus)
   const location = useLocation()
   const navItems = [
     { label: 'Dashboard', path: '/' },
@@ -823,6 +806,8 @@ function AppShell({ children }: { children: React.ReactNode }) {
     { label: 'Profile', path: '/profile' },
   ]
   const currentUser = getCurrentUser()
+
+  useEffect(() => subscribeToWebMcpStatus(setWebMcpStatus), [])
 
   return (
     <div className="app-shell">
@@ -863,6 +848,9 @@ function AppShell({ children }: { children: React.ReactNode }) {
               Logout
             </button>
             <span className="demo-badge">DEMO MODE</span>
+            <span className={`webmcp-status ${webMcpStatus.found ? 'available' : 'unavailable'}`} title={webMcpStatus.registered.join(', ') || 'No tools registered'}>
+              WebMCP {webMcpStatus.found ? `${webMcpStatus.registered.length} tools` : 'unavailable'}
+            </span>
           </div>
         </header>
         <div className="page-body">{children}</div>
