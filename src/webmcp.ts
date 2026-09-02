@@ -7,7 +7,6 @@ let currentStatus: WebMcpStatus = { found: false, registered: [], error: 'Waitin
 
 declare global {
   interface Navigator { modelContext?: ModelContext }
-  interface Document { modelContext?: ModelContext }
 }
 
 type ModelContext = {
@@ -31,9 +30,7 @@ const registrationKey = Symbol.for('applyflow.webmcp-registration')
 type RegistrationState = { context: ModelContext; promise: Promise<void> }
 
 function getNativeModelContext(): ModelContext | undefined {
-  const context = typeof document !== 'undefined'
-    ? document.modelContext ?? (typeof navigator !== 'undefined' ? navigator.modelContext : undefined)
-    : undefined
+  const context = typeof navigator !== 'undefined' ? navigator.modelContext : undefined
   return context && typeof context.registerTool === 'function' && typeof context.getTools === 'function' ? context : undefined
 }
 
